@@ -1,0 +1,37 @@
+[project]
+name = "ogmios"
+version = "0.1.0"
+description = "Local hybrid (keyword + semantic) search over markdown notes"
+readme = "README.md"
+requires-python = ">=3.13"
+authors = [
+  { name="Theo Gilbert" }
+]
+license = "GPL-3.0-or-later"
+license-files = ["LICENSE"]
+keywords = ["notes", "search", "markdown", "embeddings", "neovim"]
+dependencies = [
+    "numpy>=2",
+    "onnxruntime>=1.22",
+    "tokenizers>=0.21",
+]
+
+[project.scripts]
+ogmios = "ogmios.__main__:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["ogmios"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+    "ruff>=0.15.16",
+    "ty>=0.0.44",
+]

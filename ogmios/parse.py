@@ -31,7 +31,7 @@ _HEADING_LEVEL_RE = re.compile(r"^ {0,3}(#{1,6})\s")
 _RULE_RE = re.compile(r"^\s*([-*_=])(\s*\1){2,}\s*$")
 
 
-def _blank(line: str) -> bool:
+def blank(line: str) -> bool:
     """Blank lines and horizontal rules separate content but carry none."""
     return not line.strip() or bool(_RULE_RE.match(line))
 
@@ -160,7 +160,7 @@ def _indent(line: str) -> int:
 
 
 def split_blocks(lines: list[str], start: int, end: int) -> list[Block]:
-    body = [i for i in range(start, end) if not _blank(lines[i])]
+    body = [i for i in range(start, end) if not blank(lines[i])]
     if not body:
         return []
     base = min(_indent(lines[i]) for i in body)
@@ -171,7 +171,7 @@ def split_blocks(lines: list[str], start: int, end: int) -> list[Block]:
     in_fence = False
     for i in range(start, end):
         line = lines[i]
-        if _blank(line):
+        if blank(line):
             previous_blank = True
             continue
         fence = line.lstrip().startswith("```")
@@ -200,7 +200,7 @@ def split_blocks(lines: list[str], start: int, end: int) -> list[Block]:
 
 
 def _trim_end(lines: list[str], start: int, end: int) -> int:
-    while end > start and _blank(lines[end - 1]):
+    while end > start and blank(lines[end - 1]):
         end -= 1
     return end
 

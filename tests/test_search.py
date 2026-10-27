@@ -91,3 +91,26 @@ def test_queries_about_anything():
     assert is_about_anything("what did I do")
     assert is_about_anything("qu'ai-je fait ?")
     assert not is_about_anything("what did I do about sftp")
+
+
+class KubernetesEmbedder:
+    """Text about Kubernetes is the closest to any query."""
+
+    name = "fake"
+
+    def passages(self, texts):
+        return np.array(
+            [[1.0, 0.0] if "Kubernetes" in t else [0.0, 1.0] for t in texts]
+        )
+
+    def query(self, text):
+        return np.array([1.0, 0.0])
+
+
+def test_line_closest_in_meaning_when_no_word_matches(db):
+    embedder = KubernetesEmbedder()
+    db.execute("UPDATE embeddings SET vector = ?", (np.ones(2, np.float32).tobytes(),))
+    hits = search(db, embedder, "orchestrateur")  # ty: ignore[invalid-argument-type]
+    day = next(h for h in hits if h.date == "2023-01-09")
+    assert "Kubernetes" in day.snippet
+    assert not any(h.snippet.startswith("##") for h in hits)

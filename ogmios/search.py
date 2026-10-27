@@ -4,12 +4,13 @@ then grouped by section so that each day appears once."""
 import re
 import sqlite3
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import numpy as np
 
 from .embed import Embedder
+from .parse import blank
 from .when import Period
 
 CANDIDATES = 200
@@ -106,7 +107,7 @@ def _fts_ranking(
 
 
 def _vector_ranking(
-    db: sqlite3.Connection, embedder: Embedder, query: str, period: Period | None
+    db: sqlite3.Connection, embedder: Embedder, q: np.ndarray, period: Period | None
 ) -> list[int]:
     condition, params = _period_filter(period)
     rows = db.execute(
@@ -121,7 +122,6 @@ def _vector_ranking(
     matrix = np.frombuffer(b"".join(r[1] for r in rows), dtype=np.float32).reshape(
         len(rows), -1
     )
-    q = embedder.query(query)
     scores = matrix @ (q / np.linalg.norm(q)) / np.linalg.norm(matrix, axis=1)
     top = np.argsort(-scores)[:CANDIDATES]
     return [int(i) for i in ids[top]]
@@ -142,8 +142,9 @@ def search(
             _fts_ranking(db, terms, period),
         )
     ]
-    if embedder is not None:
-        rankings.append((1.0, _vector_ranking(db, embedder, query, period)))
+    q = embedder.query(query) if embedder is not None else None
+    if embedder is not None and q is not None:
+        rankings.append((1.0, _vector_ranking(db, embedder, q, period)))
 
     chunk_scores: dict[int, float] = {}
     for weight, ranking in rankings:
@@ -156,7 +157,7 @@ def search(
 
     placeholders = ",".join("?" * len(chunk_scores))
     rows = db.execute(
-        "SELECT c.id, c.start_line, c.end_line, s.id, s.path, s.title, s.date"
+        "SELECT c.id, c.start_line, c.end_line, s.id, s.path, s.title, s.date, s.start_line"
         f" FROM chunks c JOIN sections s ON s.id = c.section_id WHERE c.id IN ({placeholders})",
         list(chunk_scores),
     ).fetchall()
@@ -171,14 +172,41 @@ def search(
     ranked = sorted(best.values(), key=lambda item: -item[0])[:limit]
     file_lines: dict[str, list[str]] = {}
     hits = []
-    for score, (_, start, end, _, path, title, date) in ranked:
+    unmatched: list[tuple[int, list[int]]] = []  # hit, and its lines to choose from
+    for score, (_, start, end, _, path, title, date, header) in ranked:
         if path not in file_lines:
             file_lines[path] = (
                 Path(path).read_text(encoding="utf-8", errors="replace").splitlines()
             )
-        line = _best_line(file_lines[path], start, end, terms)
-        snippet = file_lines[path][line].strip() if line < len(file_lines[path]) else ""
+        lines = file_lines[path]
+        content = [i for i in range(start, min(end, len(lines))) if not blank(lines[i])]
+        # Not the header, nor a bare label ("> misc"), when the chunk holds more.
+        content = (
+            [i for i in content if i != header and len(lines[i].split()) > 2]
+            or [i for i in content if i != header]
+            or content
+            or [start]
+        )
+        line, matched = _best_line(lines, content, terms)
+        if not matched:
+            unmatched.append((len(hits), content))
+        snippet = lines[line].strip() if line < len(lines) else ""
         hits.append(Hit(path, line + 1, title, date, snippet, score))
+
+    if embedder is not None and q is not None and unmatched:
+        # No query word on any line: point at the line closest in meaning.
+        texts = [
+            file_lines[hits[h].path][i].strip()
+            for h, content in unmatched
+            for i in content
+        ]
+        scores = embedder.passages(texts) @ q
+        offset = 0
+        for h, content in unmatched:
+            closest = content[int(np.argmax(scores[offset : offset + len(content)]))]
+            offset += len(content)
+            snippet = file_lines[hits[h].path][closest].strip()
+            hits[h] = replace(hits[h], line=closest + 1, snippet=snippet)
 
     if sort == "date":
         hits.sort(key=lambda h: (h.date or "", h.path, h.line))
@@ -216,19 +244,17 @@ def _fold(text: str) -> str:
     )
 
 
-def _best_line(lines: list[str], start: int, end: int, terms: list[str]) -> int:
-    """The line of the chunk matching the most query terms, else its first non-blank line."""
+def _best_line(
+    lines: list[str], content: list[int], terms: list[str]
+) -> tuple[int, bool]:
+    """The line matching the most query terms, else the first; and whether any matched."""
     folded_terms = [_fold(t).replace(" ", "") for t in terms]
-    best, best_count = None, 0
-    for i in range(start, min(end, len(lines))):
-        if not lines[i].strip():
-            continue
-        if best is None:
-            best = i
+    best, best_count = content[0], 0
+    for i in content:
         folded = _fold(lines[i])
         # Also without punctuation, so that the compound "net 881" finds "NET-881".
         haystack = folded + " " + re.sub(r"\W+", "", folded)
         count = sum(t in haystack for t in folded_terms)
         if count > best_count:
             best, best_count = i, count
-    return best if best is not None else start
+    return best, best_count > 0

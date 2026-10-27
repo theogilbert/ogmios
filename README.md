@@ -64,6 +64,7 @@ These edit `~/.config/ogmios/config.toml` in place, keeping its comments. By han
 
 ```toml
 # model = "e5-small-int8"   # or "e5-small" (fp32, 470 MB, same results, slower)
+#                           # or "e5-base-int8" (280 MB, ~40% slower, ~600 MB peak)
 
 [[sources]]
 path = "~/work/done.md"

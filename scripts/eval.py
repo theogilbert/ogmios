@@ -25,6 +25,7 @@ CASES = [
     ("which python library broke the sftp operator", "2024-03-07"),
     ("first day at the company", "2022-03-14"),
     ("plan to get rid of the old managed airflow", "2025-01-08"),
+    ("migration orchestrateur", "2025-01-08"),
     # jargon
     ("NET-881 approval", "2024-04-09"),
     ("RESEAU-5120", "2023-02-17"),

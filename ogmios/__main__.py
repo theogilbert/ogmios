@@ -331,6 +331,7 @@ def cmd_config_edit(args: argparse.Namespace) -> None:
 
 _TEMPLATE = """\
 # model = "e5-small-int8"   # or "e5-small" (fp32, slower, same results)
+#                           # or "e5-base-int8" (larger, slower, see the README)
 
 # [[sources]]
 # path = "~/work/done.md"

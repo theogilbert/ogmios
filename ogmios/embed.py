@@ -52,6 +52,11 @@ MODELS = {
         "614241f622f53c4eeff9890bdc4f31cfecc418b3",
         "onnx/model.onnx",
     ),
+    "e5-base-int8": ModelSpec(
+        "Xenova/multilingual-e5-base",
+        "1ec9243030a27d1a115d5c340572074c125b58b2",
+        "onnx/model_int8.onnx",
+    ),
 }
 DEFAULT_MODEL = "e5-small-int8"
 

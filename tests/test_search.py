@@ -7,7 +7,7 @@ import pytest
 
 from ogmios import store
 from ogmios.config import Source
-from ogmios.search import query_terms, search
+from ogmios.search import is_about_anything, notes_in, query_terms, search
 
 FIXTURE = Path(__file__).parent / "fixtures" / "done.md"
 
@@ -69,3 +69,25 @@ def test_summary_and_changes(db, tmp_path):
     assert summary.embeddings == {"fake": summary.chunks}
     assert store.missing_embeddings(db, "other-model") > 0
     assert store.changed_files(db, {}) == {str(FIXTURE.resolve())}
+
+
+def test_notes_in_a_period(db):
+    from datetime import date
+
+    from ogmios.when import Period
+
+    day = date(2022, 4, 11)
+    hits = notes_in(db, Period(day, day, "yesterday"))
+    assert [h.snippet for h in hits] == [
+        "- Relance équipe réseau sur RESEAU-4512, toujours en attente de validation sécu",
+        "- Point avec Julie sur le planning du sprint",
+    ]
+    empty = date(2022, 4, 12)
+    assert notes_in(db, Period(empty, empty, "yesterday")) == []
+    assert search(db, None, "RESEAU-4512", period=Period(day, day, ""))[0].line == 24
+
+
+def test_queries_about_anything():
+    assert is_about_anything("what did I do")
+    assert is_about_anything("qu'ai-je fait ?")
+    assert not is_about_anything("what did I do about sftp")

@@ -6,12 +6,14 @@ import shlex
 import subprocess
 import sys
 from dataclasses import asdict
+from datetime import date
 from pathlib import Path
 
 from . import config, store
 from .embed import MODELS, Embedder
 from .parse import SplitOptions, chunk_section, parse_file
-from .search import search
+from .search import is_about_anything, notes_in, search
+from .when import find_period
 
 
 def main() -> None:
@@ -56,7 +58,12 @@ def parse_cli_args() -> argparse.Namespace:
         "search", help="search the notes (refreshes the index first)"
     )
     find.add_argument("query", nargs="+")
-    find.add_argument("-n", "--limit", type=int, default=20)
+    find.add_argument(
+        "-n",
+        "--limit",
+        type=int,
+        help="number of results (default: 20, all when listing a period's notes)",
+    )
     find.add_argument("--sort", choices=["score", "date"], default="score")
     find.add_argument("--json", action="store_true", help="one JSON object per line")
     find.add_argument(
@@ -152,12 +159,25 @@ def cmd_index(args: argparse.Namespace) -> None:
 def cmd_search(args: argparse.Namespace) -> None:
     cfg, embedder = _setup(args)
     query = " ".join(args.query)
-    if args.keyword:
-        db = store.connect(args.db)
-        hits = search(db, None, query, args.limit, args.sort)
-    else:
+    period = None
+    if found := find_period(query, date.today()):
+        period, query = found
+    if period and is_about_anything(query):
+        # "What did I do yesterday": the period's notes, no ranking, no model.
         db = _refresh(args, cfg, embedder)
-        hits = search(db, embedder, query, args.limit, args.sort)
+        hits = notes_in(db, period)[: args.limit]
+        found = "notes from" if hits else "no notes on"
+        print(f"ogmios: {found} {period} ({period.words})", file=sys.stderr)
+    else:
+        if period:
+            print(f"ogmios: searching {period} ({period.words})", file=sys.stderr)
+        limit = args.limit or 20
+        if args.keyword:
+            db = store.connect(args.db)
+            hits = search(db, None, query, limit, args.sort, period)
+        else:
+            db = _refresh(args, cfg, embedder)
+            hits = search(db, embedder, query, limit, args.sort, period)
     for hit in hits:
         if args.json:
             print(json.dumps(asdict(hit), ensure_ascii=False))

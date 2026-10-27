@@ -10,6 +10,7 @@ from pathlib import Path
 import numpy as np
 
 from .embed import Embedder
+from .when import Period
 
 CANDIDATES = 200
 RRF_K = 60
@@ -31,6 +32,12 @@ STOPWORDS = {
     "te", "tes", "ton", "tu", "un", "une", "vos", "votre", "vous", "y", "quand", "quel",
     "quelle", "quels", "quelles", "comment", "pourquoi", "été", "être", "avoir", "fait",
     "faire", "ai", "avons", "avez", "ont",
+}
+# Words that ask what happened rather than about something: "what did I do yesterday".
+FILLER = {
+    "do", "doing", "done", "work", "worked", "working", "happen", "happened",
+    "write", "wrote", "written", "note", "up", "get", "got", "fais", "faisais",
+    "passe", "quoi", "travaille", "ecrit", "bosse",
 }
 # fmt: on
 
@@ -65,23 +72,48 @@ def query_terms(query: str) -> list[str]:
     return list(dict.fromkeys(terms))
 
 
-def _fts_ranking(db: sqlite3.Connection, terms: list[str]) -> list[int]:
+def is_about_anything(query: str) -> bool:
+    """Whether a query says nothing of a topic ("what did I do", "qu'ai-je fait")."""
+    # Word by word: "qu'ai-je" is not jargon.
+    words = [w for w in _WORD_RE.findall(query.lower()) if len(w) > 1]
+    return all(
+        w in STOPWORDS or _fold(w) in FILLER or _fold(w).removesuffix("s") in FILLER
+        for w in words
+    )
+
+
+def _period_filter(period: Period | None) -> tuple[str, list[str]]:
+    """SQL condition on sections `s`, and its parameters."""
+    if period is None:
+        return "1", []
+    return "s.date BETWEEN ? AND ?", [period.start.isoformat(), period.end.isoformat()]
+
+
+def _fts_ranking(
+    db: sqlite3.Connection, terms: list[str], period: Period | None
+) -> list[int]:
     if not terms:
         return []
     expression = " OR ".join(f'"{t}"' if " " in t else f'"{t}"*' for t in terms)
+    condition, params = _period_filter(period)
     rows = db.execute(
-        "SELECT rowid FROM chunks_fts WHERE chunks_fts MATCH ? ORDER BY bm25(chunks_fts) LIMIT ?",
-        (expression, CANDIDATES),
+        "SELECT f.rowid FROM chunks_fts f"
+        " JOIN chunks c ON c.id = f.rowid JOIN sections s ON s.id = c.section_id"
+        f" WHERE chunks_fts MATCH ? AND {condition} ORDER BY bm25(chunks_fts) LIMIT ?",
+        (expression, *params, CANDIDATES),
     ).fetchall()
     return [r[0] for r in rows]
 
 
 def _vector_ranking(
-    db: sqlite3.Connection, embedder: Embedder, query: str
+    db: sqlite3.Connection, embedder: Embedder, query: str, period: Period | None
 ) -> list[int]:
+    condition, params = _period_filter(period)
     rows = db.execute(
-        "SELECT c.id, e.vector FROM chunks c JOIN embeddings e ON e.hash = c.hash AND e.model = ?",
-        (embedder.name,),
+        "SELECT c.id, e.vector FROM chunks c"
+        " JOIN embeddings e ON e.hash = c.hash AND e.model = ?"
+        f" JOIN sections s ON s.id = c.section_id WHERE {condition}",
+        (embedder.name, *params),
     ).fetchall()
     if not rows:
         return []
@@ -101,13 +133,17 @@ def search(
     query: str,
     limit: int = 20,
     sort: str = "score",
+    period: Period | None = None,
 ) -> list[Hit]:
     terms = query_terms(query)
     rankings = [
-        (KEYWORD_WEIGHT if embedder is not None else 1.0, _fts_ranking(db, terms))
+        (
+            KEYWORD_WEIGHT if embedder is not None else 1.0,
+            _fts_ranking(db, terms, period),
+        )
     ]
     if embedder is not None:
-        rankings.append((1.0, _vector_ranking(db, embedder, query)))
+        rankings.append((1.0, _vector_ranking(db, embedder, query, period)))
 
     chunk_scores: dict[int, float] = {}
     for weight, ranking in rankings:
@@ -146,6 +182,29 @@ def search(
 
     if sort == "date":
         hits.sort(key=lambda h: (h.date or "", h.path, h.line))
+    return hits
+
+
+def notes_in(db: sqlite3.Connection, period: Period) -> list[Hit]:
+    """Every line written in the period, oldest first."""
+    condition, params = _period_filter(period)
+    sections = db.execute(
+        "SELECT path, start_line, end_line, title, date FROM sections s"
+        f" WHERE {condition} ORDER BY date, path, start_line",
+        params,
+    ).fetchall()
+    file_lines: dict[str, list[str]] = {}
+    hits = []
+    for path, start, end, title, date in sections:
+        if path not in file_lines:
+            file_lines[path] = (
+                Path(path).read_text(encoding="utf-8", errors="replace").splitlines()
+            )
+        lines = file_lines[path]
+        # The header line is the date itself, already shown on every hit.
+        for i in range(start + 1, min(end, len(lines))):
+            if lines[i].strip():
+                hits.append(Hit(path, i + 1, title, date, lines[i].strip(), 0.0))
     return hits
 
 

@@ -94,6 +94,11 @@ ogmios search --keyword "NET-881"    # keywords only, no model load (~0.1s)
 ogmios search --json "..."           # one JSON object per line
 ```
 
+Time expressions in English or French ("yesterday", "last week", "il y a deux semaines",
+"in March 2024", "14 mars") restrict the search to that period, shown on stderr. Asked
+with no topic, as in "what did I do yesterday", the period's notes are listed in order,
+or nothing if there are none.
+
 `ogmios status` shows where the config, index and model are stored, what each source
 matches, and whether the index is up to date.
 

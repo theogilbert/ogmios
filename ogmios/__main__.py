@@ -2,6 +2,8 @@ import argparse
 import json
 import os
 import re
+import shlex
+import subprocess
 import sys
 from dataclasses import asdict
 from pathlib import Path
@@ -71,6 +73,43 @@ def parse_cli_args() -> argparse.Namespace:
         "status", help="show where files are stored and the state of the index"
     )
     status.set_defaults(func=cmd_status)
+
+    cfg = commands.add_parser("config", help="change the configuration")
+    cfg_commands = cfg.add_subparsers(required=True)
+    add = cfg_commands.add_parser("add", help="add a file or directory of notes")
+    add.add_argument("path", type=Path)
+    add.add_argument("--glob", help="files to index in a directory (default: **/*.md)")
+    add.add_argument(
+        "--exclude",
+        action="append",
+        metavar="GLOB",
+        help="files to skip, relative to the directory (repeatable)",
+    )
+    add.add_argument(
+        "--split",
+        choices=["auto", "dates", "headings"],
+        help="split on date lines or headings (default: auto)",
+    )
+    add.add_argument(
+        "--delimiter",
+        action="append",
+        metavar="REGEX",
+        help="regex selecting the date lines, if auto-detection fails (repeatable)",
+    )
+    add.add_argument(
+        "--month-first", action="store_true", help="03/04/2024 is March the 4th"
+    )
+    add.set_defaults(func=cmd_config_add)
+    remove = cfg_commands.add_parser("remove", help="stop indexing a source")
+    remove.add_argument("path", type=Path)
+    remove.set_defaults(func=cmd_config_remove)
+    model = cfg_commands.add_parser("model", help="show or set the embedding model")
+    model.add_argument("name", nargs="?", choices=sorted(MODELS))
+    model.set_defaults(func=cmd_config_model)
+    show = cfg_commands.add_parser("show", help="print the config file")
+    show.set_defaults(func=cmd_config_show)
+    edit = cfg_commands.add_parser("edit", help="open the config file in $EDITOR")
+    edit.set_defaults(func=cmd_config_edit)
 
     return parser.parse_args()
 
@@ -160,14 +199,16 @@ def cmd_status(args: argparse.Namespace) -> None:
 
     print("paths")
     config_note = "" if args.config.exists() else "  (not found)"
-    print(f"  config  {_home(args.config)}{config_note}{overridden('OGMIOS_CONFIG')}")
+    print(
+        f"  config  {config.tilde(args.config)}{config_note}{overridden('OGMIOS_CONFIG')}"
+    )
     db_note = f"  ({_size(args.db)})" if args.db.exists() else "  (not created yet)"
-    print(f"  index   {_home(args.db)}{db_note}{overridden('OGMIOS_DB')}")
-    print(f"  models  {_home(config.cache_dir() / 'models')}")
+    print(f"  index   {config.tilde(args.db)}{db_note}{overridden('OGMIOS_DB')}")
+    print(f"  models  {config.tilde(config.cache_dir() / 'models')}")
 
     print(f"\nmodel  {embedder.name}  ({embedder.spec.repo})")
     if embedder.downloaded:
-        print(f"  {_home(embedder.dir)}  ({_size(embedder.dir)})")
+        print(f"  {config.tilde(embedder.dir)}  ({_size(embedder.dir)})")
     else:
         print("  not downloaded yet, run `ogmios index`")
 
@@ -176,10 +217,10 @@ def cmd_status(args: argparse.Namespace) -> None:
     )
     for source in cfg.sources:
         if source.path.is_dir():
-            where = f"{_home(source.path)}/{source.glob}"
+            where = f"{config.tilde(source.path)}/{source.glob}"
             found = _plural(len(source.files()), "file")
         else:
-            where = str(_home(source.path))
+            where = config.tilde(source.path)
             found = "file" if source.path.is_file() else "missing"
         split = source.options.split
         print(f"  {where}  ({found}, split: {split})")
@@ -211,16 +252,81 @@ def cmd_status(args: argparse.Namespace) -> None:
         print(f"  stale: {', '.join(reasons)} (the next search re-indexes)")
 
 
+def cmd_config_add(args: argparse.Namespace) -> None:
+    path = args.path.expanduser().absolute()
+    if not path.exists():
+        raise ValueError(f"{args.path}: no such file or directory")
+    entry: dict = {"path": config.tilde(path)}
+    if args.glob:
+        entry["glob"] = args.glob
+    if args.exclude:
+        entry["exclude"] = args.exclude
+    if args.split:
+        entry["split"] = args.split
+    if args.delimiter:
+        for pattern in args.delimiter:
+            try:
+                re.compile(pattern)
+            except re.error as e:
+                raise ValueError(f"invalid delimiter {pattern!r}: {e}") from None
+        entry["delimiters"] = args.delimiter
+    if args.month_first:
+        entry["day_first"] = False
+    source = config.add_source(args.config, entry)
+    found = _plural(len(source.files()), "file") if path.is_dir() else "file"
+    print(f"added {entry['path']} ({found}), indexed on the next search")
+
+
+def cmd_config_remove(args: argparse.Namespace) -> None:
+    config.remove_source(args.config, args.path)
+    print(f"removed {config.tilde(args.path)}")
+
+
+def cmd_config_model(args: argparse.Namespace) -> None:
+    if args.name is None:
+        print(config.load(args.config).model)
+        return
+    config.set_model(args.config, args.name)
+    print(f"model set to {args.name}, notes are re-embedded on the next search")
+
+
+def cmd_config_show(args: argparse.Namespace) -> None:
+    if not args.config.exists():
+        raise ValueError(
+            f"no config file at {config.tilde(args.config)},"
+            " add a source with `ogmios config add PATH`"
+        )
+    print(args.config.read_text(encoding="utf-8"), end="")
+
+
+def cmd_config_edit(args: argparse.Namespace) -> None:
+    if not args.config.exists():
+        args.config.parent.mkdir(parents=True, exist_ok=True)
+        args.config.write_text(_TEMPLATE, encoding="utf-8")
+    editor = os.environ.get("VISUAL") or os.environ.get("EDITOR") or "vi"
+    subprocess.run([*shlex.split(editor), str(args.config)], check=True)
+    cfg = config.load(args.config)  # report mistakes right away
+    print(f"{_plural(len(cfg.sources), 'source')}, model {cfg.model}")
+
+
+_TEMPLATE = """\
+# model = "e5-small-int8"   # or "e5-small" (fp32, slower, same results)
+
+# [[sources]]
+# path = "~/work/done.md"
+# split = "auto"                         # auto | dates | headings
+# delimiters = ['^## \\d{4}-\\d{2}-\\d{2}'] # if auto-detection gets it wrong
+# day_first = true                       # 03/04/2024 is the 3rd of April
+
+# [[sources]]
+# path = "~/notes"
+# glob = "**/*.md"
+# exclude = ["archive/**"]
+"""
+
+
 def _plural(n: int, noun: str) -> str:
     return f"{n} {noun}{'s' * (n != 1)}"
-
-
-def _home(path: Path) -> Path:
-    """`path` with the home directory shown as ~."""
-    path = path.expanduser().absolute()
-    if path.is_relative_to(Path.home()):
-        return Path("~") / path.relative_to(Path.home())
-    return path
 
 
 def _size(path: Path) -> str:

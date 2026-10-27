@@ -48,7 +48,19 @@ uv tool install --editable ~/projects/ogmios
 
 ## Configure
 
-`~/.config/ogmios/config.toml`:
+From the command line:
+
+```sh
+ogmios config add ~/work/done.md                 # a file of daily notes
+ogmios config add ~/notes --exclude "archive/**" # every **/*.md under a directory
+ogmios config add ~/journal.md --month-first --delimiter '^## \d{4}'
+ogmios config remove ~/notes
+ogmios config model e5-small                     # show or set the embedding model
+ogmios config show                               # print the file
+ogmios config edit                               # open it in $EDITOR
+```
+
+These edit `~/.config/ogmios/config.toml` in place, keeping its comments. By hand:
 
 ```toml
 # model = "e5-small-int8"   # or "e5-small" (fp32, 470 MB, same results, slower)

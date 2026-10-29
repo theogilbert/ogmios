@@ -7,7 +7,6 @@ memory-mapped, so loading it takes about a second and nothing needs to stay runn
 between questions.
 """
 
-import importlib.util
 import re
 import sqlite3
 from collections.abc import Iterator
@@ -41,9 +40,6 @@ CONTEXT_TOKENS = 4096
 # on a laptop CPU: most of the time to the answer.
 BUDGET_CHARS = 6_000
 EXCERPT_CHARS = 2_500  # a long day is cut down to the lines around the hit
-
-# The tilde is outside the quotes, so that the shell expands it.
-INSTALL = "uv tool install --editable ~/projects/ogmios'[ask]'"
 
 SYSTEM = """\
 You answer questions about the user's own notes, using only the excerpts given.
@@ -189,13 +185,9 @@ def model_path(name: str, cache_dir: Path) -> Path:
 _quiet = None  # see `answer`
 
 
-def has_runtime() -> bool:
-    """Whether llama-cpp-python, the optional `ask` dependency, is installed."""
-    return importlib.util.find_spec("llama_cpp") is not None
-
-
 def answer(model: Path, chat: list[dict]) -> Iterator[str]:
     """The answer, piece by piece as it is written."""
+    # Imported here: loading llama.cpp would slow down every other command.
     import ctypes
 
     import llama_cpp

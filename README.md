@@ -18,7 +18,7 @@ Everything runs on the CPU. No server, no GPU, nothing in memory between searche
 | First full index, ~11k lines | ~30 s, ~750 MB peak |
 | Search | ~0.6 s, ~420 MB peak, then the process exits |
 | `--keyword` search | ~0.1 s, ~40 MB |
-| `ask` (optional LLM, 3.3 GB on disk) | ~5–15 s, ~1.5 GB plus the model file mapped from disk |
+| `ask` (LLM, 3.3 GB on disk) | ~5–15 s, ~1.5 GB plus the model file mapped from disk |
 
 ## How it works
 
@@ -44,21 +44,14 @@ Everything runs on the CPU. No server, no GPU, nothing in memory between searche
 ## Install
 
 ```sh
-uv tool install --editable ~/projects/ogmios
-ogmios setup --no-llm    # downloads the embedding model, writes it to the config
+uv tool install --editable ~/projects/ogmios  # compiles llama.cpp: needs a C++ compiler and cmake, ~3 min
+ogmios setup             # downloads the models, writes them to the config
+ogmios setup --no-llm    # the same without the LLM (3.3 GB), if you will not use `ask`
 ```
 
 Nothing is downloaded behind your back: a command whose model is missing fails and
 points at `ogmios setup`, which says what it downloads and where before doing it. An
 interrupted download resumes where it stopped on the next run.
-
-For `ogmios ask` (below), install the optional dependency, compiled on install (needs a
-C++ compiler and cmake, ~3 min), and run `setup` again, without `--no-llm`:
-
-```sh
-uv tool install --editable ~/projects/ogmios'[ask]'
-ogmios setup             # also downloads the LLM (3.3 GB)
-```
 
 ## Configure
 

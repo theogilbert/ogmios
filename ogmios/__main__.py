@@ -84,7 +84,7 @@ def parse_cli_args() -> argparse.Namespace:
 
     question = commands.add_parser(
         "ask",
-        help="answer a question from the notes, with a local LLM (needs the `ask` extra)",
+        help="answer a question from the notes, with a local LLM",
     )
     question.add_argument("question", nargs="+")
     question.add_argument(
@@ -229,8 +229,6 @@ def cmd_setup(args: argparse.Namespace) -> None:
         config.set_value(args.config, "llm", cfg.llm)
         settings += f', llm = "{cfg.llm}"'
     print(f"\nset {settings} in {config.tilde(args.config)}")
-    if not args.no_llm and not ask.has_runtime():
-        print(f"`ogmios ask` also needs llama-cpp-python: {ask.INSTALL}")
 
 
 def cmd_index(args: argparse.Namespace) -> None:
@@ -273,8 +271,6 @@ def cmd_ask(args: argparse.Namespace) -> None:
     model = ask.model_path(cfg.llm, config.cache_dir() / "models")
     if not args.prompt:
         hub.installed(model, f"LLM {cfg.llm}")
-        if not ask.has_runtime():
-            raise ValueError(f"`ogmios ask` needs llama-cpp-python: {ask.INSTALL}")
     question = " ".join(args.question)
     db = _refresh(args, cfg, embedder)
     period = None
@@ -364,8 +360,6 @@ def cmd_status(args: argparse.Namespace) -> None:
         print("  not installed, run `ogmios setup`")
     else:
         print(f"  {config.tilde(llm)}  ({_size(llm)})")
-        if not ask.has_runtime():
-            print(f"  llama-cpp-python missing: {ask.INSTALL}")
 
     print(
         "\nsources" + ("" if cfg.sources else "  none, pass --source or configure them")

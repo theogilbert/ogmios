@@ -14,11 +14,9 @@ dependencies = [
     "numpy>=2",
     "onnxruntime>=1.22",
     "tokenizers>=0.21",
+    # Compiled from source on install: needs a C++ compiler and cmake.
+    "llama-cpp-python>=0.3.36",
 ]
-
-[project.optional-dependencies]
-# `ogmios ask`: compiled from source on install (needs a C++ compiler and cmake).
-ask = ["llama-cpp-python>=0.3.36"]
 
 [project.scripts]
 ogmios = "ogmios.__main__:main"

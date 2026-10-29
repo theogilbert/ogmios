@@ -253,7 +253,7 @@ def cmd_ask(args: argparse.Namespace) -> None:
         print()
     for i, e in enumerate(excerpts, 1):
         if e in sources:
-            print(f"[{i}] {e.path}:{e.line} │ {e.date or e.title}")
+            print(f"[{i}] {e.date or e.title} │ {e.path}:{e.line}")
 
 
 def cmd_inspect(args: argparse.Namespace) -> None:

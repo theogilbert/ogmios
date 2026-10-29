@@ -9,7 +9,7 @@ from dataclasses import asdict
 from datetime import date
 from pathlib import Path
 
-from . import config, store
+from . import ask, config, hub, store
 from .embed import MODELS, Embedder
 from .parse import SplitOptions, chunk_section, parse_file
 from .search import is_about_anything, notes_in, search
@@ -48,6 +48,17 @@ def parse_cli_args() -> argparse.Namespace:
     parser.add_argument("--model", choices=sorted(MODELS), help="embedding model")
     commands = parser.add_subparsers(required=True)
 
+    setup = commands.add_parser(
+        "setup",
+        help="download the models and configure ogmios to use them",
+        description="Download the embedding model (--model, else the configured one)"
+        " and the LLM for `ogmios ask`, then write both to the config file.",
+    )
+    setup.add_argument(
+        "--no-llm", action="store_true", help="skip the LLM (several GB)"
+    )
+    setup.set_defaults(func=cmd_setup)
+
     index = commands.add_parser("index", help="(re)build the index")
     index.add_argument(
         "--force", action="store_true", help="rebuild even if nothing changed"
@@ -70,6 +81,21 @@ def parse_cli_args() -> argparse.Namespace:
         "--keyword", action="store_true", help="keyword search only (no model, instant)"
     )
     find.set_defaults(func=cmd_search)
+
+    question = commands.add_parser(
+        "ask",
+        help="answer a question from the notes, with a local LLM (needs the `ask` extra)",
+    )
+    question.add_argument("question", nargs="+")
+    question.add_argument(
+        "-n", "--days", type=int, default=8, help="most days of notes to read"
+    )
+    question.add_argument(
+        "--prompt",
+        action="store_true",
+        help="print what the model would be given, without running it",
+    )
+    question.set_defaults(func=cmd_ask)
 
     inspect = commands.add_parser("inspect", help="show how a file is split")
     inspect.add_argument("file", type=Path)
@@ -121,7 +147,9 @@ def parse_cli_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _setup(args: argparse.Namespace) -> tuple[config.Config, Embedder]:
+def _setup(
+    args: argparse.Namespace, model_needed: bool = True
+) -> tuple[config.Config, Embedder]:
     cfg = config.load(args.config)
     if args.source:
         cfg.sources = [config.Source(path=p.expanduser()) for p in args.source]
@@ -129,8 +157,13 @@ def _setup(args: argparse.Namespace) -> tuple[config.Config, Embedder]:
         raise ValueError(
             f"no sources: pass --source or configure them in {args.config}"
         )
-    model = args.model or cfg.model
-    return cfg, Embedder(model, config.cache_dir() / "models")
+    embedder = Embedder(args.model or cfg.model, config.cache_dir() / "models")
+    # Before the index is touched, rather than halfway through re-embedding it.
+    if model_needed and not embedder.downloaded:
+        raise ValueError(
+            f"embedding model {embedder.name} is not installed, run `ogmios setup`"
+        )
+    return cfg, embedder
 
 
 def _refresh(
@@ -151,13 +184,62 @@ def _refresh(
     return db
 
 
+def cmd_setup(args: argparse.Namespace) -> None:
+    cfg = config.load(args.config)
+    models = config.cache_dir() / "models"
+    embedder = Embedder(args.model or cfg.model, models)
+    spec = embedder.spec
+    wanted = [
+        (
+            f"embedding model {embedder.name}",
+            spec.repo,
+            spec.revision,
+            embedder.dir,
+            embedder.files,
+        )
+    ]
+    if not args.no_llm:
+        llm = ask.LLMS[cfg.llm]
+        directory = hub.model_dir(models, llm.repo, llm.revision)
+        wanted.append(
+            (f"LLM {cfg.llm}", llm.repo, llm.revision, directory, [llm.model_file])
+        )
+
+    for what, repo, revision, directory, files in wanted:
+        print(f"{what}  (huggingface.co/{repo})")
+        print(f"  into {config.tilde(directory)}")
+        missing = [f for f in files if not (directory / f).exists()]
+        if not missing:
+            print("  installed")
+            continue
+        sizes = [hub.remote_size(repo, revision, f) for f in missing]
+        size = (
+            "size unknown" if None in sizes else hub.human(sum(s or 0 for s in sizes))
+        )
+        parts = [directory / (f + ".part") for f in missing]
+        resumed = sum(p.stat().st_size for p in parts if p.exists())
+        note = f", {hub.human(resumed)} already downloaded" if resumed else ""
+        print(f"  downloading {size}{note}", flush=True)
+        for f in missing:
+            hub.download(repo, revision, f, directory)
+
+    config.set_value(args.config, "model", embedder.name)
+    settings = f'model = "{embedder.name}"'
+    if not args.no_llm:
+        config.set_value(args.config, "llm", cfg.llm)
+        settings += f', llm = "{cfg.llm}"'
+    print(f"\nset {settings} in {config.tilde(args.config)}")
+    if not args.no_llm and not ask.has_runtime():
+        print(f"`ogmios ask` also needs llama-cpp-python: {ask.INSTALL}")
+
+
 def cmd_index(args: argparse.Namespace) -> None:
     cfg, embedder = _setup(args)
     _refresh(args, cfg, embedder, force=args.force)
 
 
 def cmd_search(args: argparse.Namespace) -> None:
-    cfg, embedder = _setup(args)
+    cfg, embedder = _setup(args, model_needed=not args.keyword)
     query = " ".join(args.query)
     period = None
     if found := find_period(query, date.today()):
@@ -184,6 +266,51 @@ def cmd_search(args: argparse.Namespace) -> None:
         else:
             # grep-like, so that any picker can open the location
             print(f"{hit.path}:{hit.line}:1:{hit.date or hit.title} │ {hit.snippet}")
+
+
+def cmd_ask(args: argparse.Namespace) -> None:
+    cfg, embedder = _setup(args)
+    model = ask.model_path(cfg.llm, config.cache_dir() / "models")
+    if not args.prompt:
+        hub.installed(model, f"LLM {cfg.llm}")
+        if not ask.has_runtime():
+            raise ValueError(f"`ogmios ask` needs llama-cpp-python: {ask.INSTALL}")
+    question = " ".join(args.question)
+    db = _refresh(args, cfg, embedder)
+    period = None
+    if found := find_period(question, date.today()):
+        period, topic = found
+        if is_about_anything(topic):
+            excerpts = ask.excerpts_in(db, period)[: args.days]
+        else:
+            excerpts = ask.excerpts_for(
+                db, search(db, embedder, topic, args.days, period=period)
+            )
+    else:
+        excerpts = ask.excerpts_for(db, search(db, embedder, question, args.days))
+    if not excerpts:
+        where = f" from {period} ({period.words})" if period else ""
+        raise ValueError(f"no notes{where} to answer from")
+    chat = ask.messages(question, excerpts, date.today())
+    if args.prompt:
+        for message in chat:
+            print(f"--- {message['role']}\n{message['content']}")
+        return
+
+    dates = sorted(e.date for e in excerpts if e.date)
+    span = f", {dates[0]} to {dates[-1]}" if dates else ""
+    print(f"ogmios: reading {_plural(len(excerpts), 'excerpt')}{span}", file=sys.stderr)
+    written = []
+    for piece in ask.answer(model, chat):
+        written.append(piece)
+        print(piece, end="", flush=True)
+    print()
+    sources = ask.cited("".join(written), excerpts)
+    if sources:
+        print()
+    for i, e in enumerate(excerpts, 1):
+        if e in sources:
+            print(f"{e.path}:{e.line}:1:{e.date or e.title} │ [{i}]")
 
 
 def cmd_inspect(args: argparse.Namespace) -> None:
@@ -230,7 +357,15 @@ def cmd_status(args: argparse.Namespace) -> None:
     if embedder.downloaded:
         print(f"  {config.tilde(embedder.dir)}  ({_size(embedder.dir)})")
     else:
-        print("  not downloaded yet, run `ogmios index`")
+        print("  not installed, run `ogmios setup`")
+    llm = ask.model_path(cfg.llm, config.cache_dir() / "models")
+    print(f"\nllm  {cfg.llm}  ({ask.LLMS[cfg.llm].repo})")
+    if not llm.exists():
+        print("  not installed, run `ogmios setup`")
+    else:
+        print(f"  {config.tilde(llm)}  ({_size(llm)})")
+        if not ask.has_runtime():
+            print(f"  llama-cpp-python missing: {ask.INSTALL}")
 
     print(
         "\nsources" + ("" if cfg.sources else "  none, pass --source or configure them")
@@ -306,8 +441,11 @@ def cmd_config_model(args: argparse.Namespace) -> None:
     if args.name is None:
         print(config.load(args.config).model)
         return
-    config.set_model(args.config, args.name)
-    print(f"model set to {args.name}, notes are re-embedded on the next search")
+    config.set_value(args.config, "model", args.name)
+    if Embedder(args.name, config.cache_dir() / "models").downloaded:
+        print(f"model set to {args.name}, notes are re-embedded on the next search")
+    else:
+        print(f"model set to {args.name}, install it with `ogmios setup`")
 
 
 def cmd_config_show(args: argparse.Namespace) -> None:
@@ -332,6 +470,7 @@ def cmd_config_edit(args: argparse.Namespace) -> None:
 _TEMPLATE = """\
 # model = "e5-small-int8"   # or "e5-small" (fp32, slower, same results)
 #                           # or "e5-base-int8" (larger, slower, see the README)
+# llm = "gemma-4-e2b"       # for `ogmios ask`
 
 # [[sources]]
 # path = "~/work/done.md"
@@ -352,12 +491,7 @@ def _plural(n: int, noun: str) -> str:
 
 def _size(path: Path) -> str:
     files = [path] if path.is_file() else [p for p in path.rglob("*") if p.is_file()]
-    size = float(sum(f.stat().st_size for f in files))
-    for unit in ("B", "kB", "MB"):
-        if size < 1000:
-            return f"{size:.0f} {unit}"
-        size /= 1000
-    return f"{size:.1f} GB"
+    return hub.human(sum(f.stat().st_size for f in files))
 
 
 if __name__ == "__main__":

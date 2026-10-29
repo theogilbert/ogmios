@@ -3,6 +3,7 @@
 ~/.config/ogmios/config.toml:
 
     model = "e5-small-int8"          # optional
+    llm = "gemma-4-e2b"              # optional, for `ogmios ask`
 
     [[sources]]
     path = "~/work/done.md"
@@ -15,7 +16,7 @@
     glob = "**/*.md"
     exclude = ["archive/**"]
 
-`add_source`, `remove_source` and `set_model` edit the file as text, so that comments and
+`add_source`, `remove_source` and `set_value` edit the file as text, so that comments and
 layout are kept, and check the result before writing it.
 """
 
@@ -27,6 +28,7 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .ask import DEFAULT_LLM, LLMS
 from .embed import DEFAULT_MODEL, MODELS
 from .parse import SplitOptions
 
@@ -57,6 +59,7 @@ class Source:
 class Config:
     sources: list[Source]
     model: str = DEFAULT_MODEL
+    llm: str = DEFAULT_LLM
 
 
 def config_path() -> Path:
@@ -99,7 +102,10 @@ def _parse(text: str) -> Config:
         raise ValueError(
             f"unknown model {model!r}, expected one of: {', '.join(MODELS)}"
         )
-    return Config(sources=sources, model=model)
+    llm = raw.get("llm", DEFAULT_LLM)
+    if llm not in LLMS:
+        raise ValueError(f"unknown llm {llm!r}, expected one of: {', '.join(LLMS)}")
+    return Config(sources=sources, model=model, llm=llm)
 
 
 def _source(entry: dict) -> Source:
@@ -150,14 +156,17 @@ def remove_source(config_file: Path, path: Path) -> None:
     raise ValueError(f"{path} is not a configured source")
 
 
-def set_model(config_file: Path, model: str) -> None:
+def set_value(config_file: Path, key: str, value: str) -> None:
+    """Set a top-level key, such as `model`."""
     lines = _read(config_file).splitlines(keepends=True)
-    line = f"model = {_toml(model)}\n"
-    top_level = itertools.takewhile(lambda l: not _TABLE_RE.match(l), lines)
-    for i, current in enumerate(top_level):
-        if re.match(r"\s*model\s*=", current):
-            lines[i] = line
-            break
+    line = f"{key} = {_toml(value)}\n"
+    top_level = list(itertools.takewhile(lambda l: not _TABLE_RE.match(l), lines))
+    keys = [i for i, l in enumerate(top_level) if re.match(r"\s*\w+\s*=", l)]
+    same = [i for i in keys if re.match(rf"\s*{key}\s*=", top_level[i])]
+    if same:
+        lines[same[0]] = line
+    elif keys:
+        lines.insert(keys[-1] + 1, line)
     else:
         # After the comments that open the file, if any.
         i = 0

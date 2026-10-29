@@ -1,21 +1,18 @@
 """Sentence embeddings with ONNX Runtime.
 
-The model and its tokenizer are downloaded from Hugging Face on first use, at a pinned
-revision so that cached vectors always match the model, then only ever read from disk.
-Loading them is most of a search's run time, the tokenizer above all: its 250k-word
+The model and its tokenizer are installed by `ogmios setup` (see `hub`). Loading them is most of a search's run time, the tokenizer above all: its 250k-word
 vocabulary covers ~100 languages. It is pruned once to the Latin script (see
 `prune_tokenizer`), which more than halves its load time and memory.
 """
 
 import json
 import os
-import shutil
-import sys
-import urllib.request
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+from . import hub
 
 if TYPE_CHECKING:
     import numpy as np
@@ -69,14 +66,19 @@ class Embedder:
             )
         self.name = name
         self.spec = MODELS[name]
-        self.dir = cache_dir / self.spec.repo.replace("/", "--") / self.spec.revision
+        self.dir = hub.model_dir(cache_dir, self.spec.repo, self.spec.revision)
         self._loaded: (
             tuple[tokenizers.Tokenizer, np.ndarray, onnxruntime.InferenceSession] | None
         ) = None
 
     @property
+    def files(self) -> list[str]:
+        """What `ogmios setup` downloads into `dir`."""
+        return ["tokenizer.json", self.spec.model_file]
+
+    @property
     def downloaded(self) -> bool:
-        return (self.dir / self.spec.model_file).exists()
+        return all((self.dir / f).exists() for f in self.files)
 
     def passages(self, texts: Iterable[str]) -> "np.ndarray":
         prefix = self.spec.passage_prefix
@@ -123,7 +125,7 @@ class Embedder:
             self.dir / "tokenizer.latin.ids.npy",
         )
         if not pruned.exists() or not ids.exists():
-            prune_tokenizer(self._fetch("tokenizer.json"), pruned, ids)
+            prune_tokenizer(self._file("tokenizer.json"), pruned, ids)
         tokenizer = tokenizers.Tokenizer.from_file(str(pruned))
         tokenizer.enable_truncation(max_length=self.spec.max_tokens)
         tokenizer.enable_padding(pad_id=PAD_ID, pad_token="<pad>")
@@ -135,26 +137,13 @@ class Embedder:
         options = onnxruntime.SessionOptions()
         options.log_severity_level = 3  # errors only
         return onnxruntime.InferenceSession(
-            str(self._fetch(self.spec.model_file)),
+            str(self._file(self.spec.model_file)),
             options,
             providers=["CPUExecutionProvider"],
         )
 
-    def _fetch(self, filename: str) -> Path:
-        path = self.dir / filename
-        if path.exists():
-            return path
-        url = f"https://huggingface.co/{self.spec.repo}/resolve/{self.spec.revision}/{filename}"
-        print(f"ogmios: downloading {url}", file=sys.stderr)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        partial = path.with_name(path.name + ".part")
-        with (
-            urllib.request.urlopen(url, timeout=30) as response,
-            partial.open("wb") as f,
-        ):
-            shutil.copyfileobj(response, f, 1 << 20)
-        partial.replace(path)
-        return path
+    def _file(self, filename: str) -> Path:
+        return hub.installed(self.dir / filename, f"embedding model {self.name}")
 
 
 def _latin(char: str) -> bool:

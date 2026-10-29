@@ -24,13 +24,15 @@ def test_add_and_remove_sources_keep_comments(tmp_path):
         config.add_source(path, {"path": "~/b.md"})
 
 
-def test_set_model_before_the_first_table(tmp_path):
+def test_set_values_before_the_first_table(tmp_path):
     path = tmp_path / "config.toml"
     path.write_text('# my notes\n[[sources]]\npath = "~/a.md"\n')
-    config.set_model(path, "e5-small")
-    config.set_model(path, "e5-small-int8")
+    config.set_value(path, "model", "e5-small")
+    config.set_value(path, "llm", "gemma-4-e2b")
+    config.set_value(path, "model", "e5-small-int8")
     assert path.read_text() == (
-        '# my notes\nmodel = "e5-small-int8"\n\n[[sources]]\npath = "~/a.md"\n'
+        '# my notes\nmodel = "e5-small-int8"\nllm = "gemma-4-e2b"\n'
+        '\n[[sources]]\npath = "~/a.md"\n'
     )
 
 
@@ -39,5 +41,7 @@ def test_invalid_edits_are_not_written(tmp_path):
     with pytest.raises(ValueError, match="invalid split"):
         config.add_source(path, {"path": "~/a.md", "split": "weekly"})
     with pytest.raises(ValueError, match="unknown model"):
-        config.set_model(path, "gpt")
+        config.set_value(path, "model", "gpt")
+    with pytest.raises(ValueError, match="unknown llm"):
+        config.set_value(path, "llm", "gpt")
     assert not path.exists()

@@ -14,10 +14,11 @@ Everything runs on the CPU. No server, no GPU, nothing in memory between searche
 
 | | |
 |---|---|
-| Model on disk | 135 MB, downloaded once from Hugging Face (pinned revision), then never fetched again |
+| Model on disk | 135 MB, downloaded by `ogmios setup` from Hugging Face (pinned revision), then never fetched again |
 | First full index, ~11k lines | ~30 s, ~750 MB peak |
 | Search | ~0.6 s, ~420 MB peak, then the process exits |
 | `--keyword` search | ~0.1 s, ~40 MB |
+| `ask` (optional LLM, 3.3 GB on disk) | ~5–15 s, ~1.5 GB plus the model file mapped from disk |
 
 ## How it works
 
@@ -44,6 +45,19 @@ Everything runs on the CPU. No server, no GPU, nothing in memory between searche
 
 ```sh
 uv tool install --editable ~/projects/ogmios
+ogmios setup --no-llm    # downloads the embedding model, writes it to the config
+```
+
+Nothing is downloaded behind your back: a command whose model is missing fails and
+points at `ogmios setup`, which says what it downloads and where before doing it. An
+interrupted download resumes where it stopped on the next run.
+
+For `ogmios ask` (below), install the optional dependency, compiled on install (needs a
+C++ compiler and cmake, ~3 min), and run `setup` again, without `--no-llm`:
+
+```sh
+uv tool install --editable ~/projects/ogmios'[ask]'
+ogmios setup             # also downloads the LLM (3.3 GB)
 ```
 
 ## Configure
@@ -56,6 +70,7 @@ ogmios config add ~/notes --exclude "archive/**" # every **/*.md under a directo
 ogmios config add ~/journal.md --month-first --delimiter '^## \d{4}'
 ogmios config remove ~/notes
 ogmios config model e5-small                     # show or set the embedding model
+                                                 # (then `ogmios setup` installs it)
 ogmios config show                               # print the file
 ogmios config edit                               # open it in $EDITOR
 ```
@@ -65,6 +80,7 @@ These edit `~/.config/ogmios/config.toml` in place, keeping its comments. By han
 ```toml
 # model = "e5-small-int8"   # or "e5-small" (fp32, 470 MB, same results, slower)
 #                           # or "e5-base-int8" (280 MB, ~40% slower, ~600 MB peak)
+# llm = "gemma-4-e2b"       # for `ogmios ask`
 
 [[sources]]
 path = "~/work/done.md"
@@ -88,7 +104,7 @@ ogmios inspect ~/work/done.md --chunks   # and what gets embedded
 ## Use
 
 ```sh
-ogmios index                         # first run: downloads the model, embeds everything
+ogmios index                         # first run: embeds everything
 ogmios search "..."                  # best match first
 ogmios search --sort date "..."      # the same hits, as a timeline
 ogmios search --keyword "NET-881"    # keywords only, no model load (~0.1s)
@@ -108,6 +124,28 @@ matches, and whether the index is up to date.
 
 The output is grep-like (`path:line:col:text`), so any picker can open the results. In
 Neovim: `utilities.search.notes()` (fzf-lua).
+
+## Ask
+
+```
+$ ogmios ask "pourquoi le DAG partner_files_ingest a échoué en janvier 2023 ?"
+ogmios: reading 3 excerpts, 2023-01-03 to 2023-01-09
+À cause d'une rotation de la clé SSH côté partenaire non communiquée [2].
+
+~/work/done.md:44:1:2023-01-05 │ [2]
+```
+
+`ogmios ask` answers a question in a sentence or two, citing the days it read. It runs
+the search above, hands the best days (up to `-n/--days`, 8 by default, ~2.5k tokens) to
+[Gemma 4 E2B](https://huggingface.co/google/gemma-4-E2B-it-qat-q4_0-gguf), a small LLM,
+in-process with llama.cpp, then exits. The model file is memory-mapped, so it loads in
+about a second; most of the wait is the model reading the notes, at ~170 tokens/s on a
+6-core laptop CPU. Time expressions work as in `search`: "what did I do last week?"
+reads that week's notes. Answers are in the language of the question.
+
+A 2B model reading excerpts can still misread them: check the cited lines, printed after
+the answer in the same grep-like format. `--prompt` prints what the model is given
+instead of running it.
 
 ## Development
 

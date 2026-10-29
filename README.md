@@ -8,7 +8,7 @@ $ ogmios ask "pourquoi le DAG partner_files_ingest a échoué en janvier 2023 ?"
 ogmios: reading 3 excerpts, 2023-01-03 to 2023-01-09
 À cause d'une rotation de la clé SSH côté partenaire non communiquée [2].
 
-[2] 2023-01-05 │ ~/work/done.md:44
+[2] 2023-01-05 | ~/work/done.md:44
 ```
 
 Everything runs on the CPU. No server, no GPU, nothing in memory between questions.
@@ -108,7 +108,7 @@ ogmios ask --prompt "..."            # what the model would be given, without ru
 ```
 
 A 2B model reading excerpts can still misread them, or miss one of two answers: check
-the cited lines, printed after the answer as `[n] day │ path:line`.
+the cited lines, printed after the answer as `[n] day | path:line`.
 
 `ogmios status` shows where the config, index and models are stored, what each source
 matches, and whether the index is up to date.

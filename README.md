@@ -29,6 +29,11 @@ Everything runs on the CPU. No server, no GPU, nothing in memory between questio
   top-level block (a `> project` or `- project` with what is indented under it), and each
   pair of adjacent blocks, so that a topic running across two items is still found. Chunks
   carry their date as context.
+- **Other wordings.** A note may say it in other words, or in the other language. The
+  model first writes the question's key terms as a note would word them, in English and
+  in French, with synonyms (~2 s; `--literal` skips it). Both the question and the
+  question with those terms are searched, and the two rankings merged, so that the terms
+  add days without pushing down those the question finds by itself.
 - **Search.** The days to read are found by keyword search (SQLite FTS5,
   accent-insensitive; `NET-881`-like jargon is matched as a phrase) and semantic search
   (`multilingual-e5-small`, cross-lingual), merged with reciprocal rank fusion and
@@ -112,19 +117,22 @@ ogmios inspect ~/work/done.md --chunks   # and what gets embedded
 ```sh
 ogmios index                         # first run: embeds everything (ask also does it)
 ogmios ask "..."
-ogmios ask --prompt "..."            # what the model would be given, without running it
+ogmios ask --prompt "..."            # what the model would be given, without the answer
+ogmios ask --literal "..."           # the question's own words only, ~2 s faster
 ogmios ask --json "..."              # one JSON object, for editor plugins
 ```
 
-On a terminal, a status line with a spinner shows what is going on (indexing, searching,
-loading the model, reading the notes) until the answer starts to appear.
+On a terminal, a status line with a spinner shows what is going on (indexing, loading the
+model, thinking of other wordings, searching, reading the notes) until the answer starts
+to appear.
 
 A date in the answer that is neither the day of an excerpt nor written in one gets a
 warning on stderr: a small model sometimes writes a wrong date while citing the right
 excerpt.
 
-`--json` prints, once the answer is written, `{"question", "answer", "warnings",
-"excerpts"}`, where
+`--json` prints, once the answer is written, `{"question", "wordings",
+"answer", "warnings", "excerpts"}`, where `wordings` is what was searched besides the
+question, and
 each excerpt the model read is `{"n", "date", "title", "path", "line", "cited"}`: `n` is
 the number the answer cites it by, `date` is null for a section without one, and `line`
 is 1-based. Progress goes to stderr; on failure, stdout is empty, the message is on

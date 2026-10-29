@@ -49,6 +49,15 @@ EXCERPT_CHARS = 2_500  # a long day is cut down to the lines around the hit
 # days, whose other parts may hold the answer when their best one only shares its words.
 BREADTH_SHARE = 0.6
 
+# The notes may say it in other words, or in the other language.
+WORDINGS = (
+    "The user searches their own work notes, written in a mix of English and French,"
+    " with jargon. Give the 4 to 6 key terms of their question as a note would word"
+    " them, technical terms included, each in English then in French, with a synonym"
+    " if it has one. One line of comma-separated terms, nothing else."
+)
+WORDINGS_TOKENS = 40  # most of the time it costs: ~15 tokens/s
+
 SYSTEM = """\
 You answer questions about the user's own notes, using only the excerpts given.
 Today is {today}. Each excerpt starts with its number in brackets and the day it was written; "…" marks lines left out.
@@ -306,12 +315,15 @@ def unknown_dates(answer: str, excerpts: list[Excerpt]) -> list[str]:
     ]
 
 
-def result(question: str, answer: str, excerpts: list[Excerpt]) -> dict:
+def result(
+    question: str, answer: str, excerpts: list[Excerpt], wordings: str = ""
+) -> dict:
     """What `ogmios ask --json` prints: every excerpt read, numbered as the answer cites
     them, and whether it does."""
     sources = cited(answer, excerpts)
     return {
         "question": question,
+        "wordings": wordings,  # what was searched besides the question, if anything
         "answer": answer,
         "warnings": [
             f"{d} is not a date of the notes read"
@@ -357,6 +369,21 @@ def load(model: Path) -> "llama_cpp.Llama":
         swa_full=False,  # the sliding-window layers keep only their window
         verbose=False,
     )
+
+
+def other_wordings(llm: "llama_cpp.Llama", question: str) -> str:
+    """Search terms for what the question is about, synonyms and translations included,
+    to search with besides the question itself."""
+    out = llm.create_chat_completion(
+        [
+            {"role": "system", "content": WORDINGS},
+            {"role": "user", "content": question},
+        ],
+        temperature=0,
+        max_tokens=WORDINGS_TOKENS,
+    )
+    text = out["choices"][0]["message"]["content"] or ""  # ty: ignore
+    return " ".join(text.split())
 
 
 def answer(llm: "llama_cpp.Llama", chat: list[dict]) -> Iterator[str]:

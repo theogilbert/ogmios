@@ -8,7 +8,7 @@ import pytest
 
 from ogmios import store
 from ogmios.config import Source
-from ogmios.search import is_about_anything, query_terms, search
+from ogmios.search import Hit, is_about_anything, merge, query_terms, search
 from ogmios.when import Period
 
 FIXTURE = Path(__file__).parent / "fixtures" / "done.md"
@@ -52,6 +52,24 @@ def test_accents_are_folded(db):
 
 def test_compounds_are_phrases():
     assert query_terms("srv-sftp-part01 and NET-881") == ["srv sftp part01", "net 881"]
+
+
+def test_french_word_order_is_not_jargon():
+    assert query_terms("qu'ai-je fait avec NET-881 ?") == ["net 881"]
+    assert query_terms("qu'est-ce que le DAG a-t-il fait") == ["dag"]
+
+
+def test_merge_keeps_what_each_search_found():
+    def hit(section, chunks):
+        return Hit("f.md", section * 10, "", None, "", 0.0, section, chunks)
+
+    asked = [hit(1, [("block", 10, 11)]), hit(2, [("block", 20, 21)])]
+    widened = [hit(3, [("block", 30, 31)]), hit(1, [("pair", 10, 12)])]
+    merged = merge(asked, widened)
+    # Day 1 is in both, first in one: it stays first; day 3, first in the other, next.
+    assert [h.section for h in merged] == [1, 3, 2]
+    assert merged[0].chunks == [("block", 10, 11), ("pair", 10, 12)]
+    assert asked[0].chunks == [("block", 10, 11)]  # the searches' hits are left alone
 
 
 def test_unchanged_index_is_not_stale(db):

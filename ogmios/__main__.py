@@ -11,7 +11,7 @@ from pathlib import Path
 from . import ask, config, hub, store
 from .embed import MODELS, Embedder
 from .parse import SplitOptions, chunk_section, parse_file
-from .search import is_about_anything, search
+from .search import is_about_anything, merge, search
 from .spinner import Spinner
 from .when import find_period
 
@@ -77,7 +77,13 @@ def parse_cli_args() -> argparse.Namespace:
     question.add_argument(
         "--prompt",
         action="store_true",
-        help="print what the model would be given, without running it",
+        help="print what the model would be given, without the answer",
+    )
+    question.add_argument(
+        "--literal",
+        action="store_true",
+        help="search the question's own words only, not other wordings the model"
+        " thinks of (~2 s faster)",
     )
     question.add_argument(
         "--json",
@@ -229,7 +235,7 @@ def cmd_index(args: argparse.Namespace) -> None:
 def cmd_ask(args: argparse.Namespace) -> None:
     cfg, embedder = _setup(args)
     model = ask.model_path(cfg.llm, config.cache_dir() / "models")
-    if not args.prompt:
+    if not (args.prompt and args.literal):
         hub.installed(model, f"LLM {cfg.llm}")
     question = " ".join(args.question)
     # Not over --json or a pipe: whatever reads stderr there wants lines, not frames.
@@ -247,23 +253,32 @@ def _ask(
     spinner: Spinner,
 ) -> None:
     db = _refresh(args, cfg, embedder, spinner=spinner)
-    spinner.status("searching the notes")
-    period = None
-    if found := find_period(question, date.today()):
-        period, topic = found
-        if is_about_anything(topic):
-            excerpts = ask.excerpts_in(db, period)[: args.days]
-        else:
-            excerpts = ask.excerpts_for(
-                db, search(db, embedder, topic, args.days, period=period)
-            )
+    period, topic = find_period(question, date.today()) or (None, question)
+    llm, wordings = None, ""
+    if period and is_about_anything(topic):
+        excerpts = ask.excerpts_in(db, period)[: args.days]
     else:
-        excerpts = ask.excerpts_for(db, search(db, embedder, question, args.days))
+        if not args.literal:
+            spinner.status("loading the model")
+            llm = ask.load(model)
+            spinner.status("thinking of other wordings")
+            wordings = ask.other_wordings(llm, topic)
+        spinner.status("searching the notes")
+        hits = search(db, embedder, topic, args.days, period=period)
+        if wordings:
+            # Merged rather than added to the question, which they would dilute.
+            widened = search(
+                db, embedder, f"{topic} {wordings}", args.days, period=period
+            )
+            hits = merge(hits, widened)[: args.days]
+        excerpts = ask.excerpts_for(db, hits)
     if not excerpts:
         where = f" from {period} ({period.words})" if period else ""
         raise ValueError(f"no notes{where} to answer from")
     chat = ask.messages(question, excerpts, date.today())
     if args.prompt:
+        if wordings:
+            print(f"--- searched besides the question\n{wordings}")
         for message in chat:
             print(f"--- {message['role']}\n{message['content']}")
         return
@@ -273,12 +288,14 @@ def _ask(
     reading = f"reading {_plural(len(excerpts), 'excerpt')}{span}"
     if not spinner.enabled:
         print(f"ogmios: {reading}", file=sys.stderr)
-    spinner.status("loading the model")
-    llm = ask.load(model)
+    if llm is None:
+        spinner.status("loading the model")
+        llm = ask.load(model)
     spinner.status(reading)
     if args.json:
         text = "".join(ask.answer(llm, chat)).strip()
-        print(json.dumps(ask.result(question, text, excerpts), ensure_ascii=False))
+        result = ask.result(question, text, excerpts, wordings)
+        print(json.dumps(result, ensure_ascii=False))
         return
     written = []
     for piece in ask.answer(llm, chat):

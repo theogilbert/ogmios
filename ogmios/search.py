@@ -64,9 +64,17 @@ def query_terms(query: str) -> list[str]:
     """FTS5 terms: single words (prefix-matched) and compounds (as "a b" phrases)."""
     terms = []
     query = query.lower()
+
+    def jargon(compound: str) -> bool:
+        # Not "ai-je", "est-ce", "a-t-il": French word order.
+        words = _WORD_RE.findall(compound)
+        return not all(w in STOPWORDS or len(w) < 2 for w in words)
+
     for compound in _COMPOUND_RE.findall(query):
-        terms.append(" ".join(_WORD_RE.findall(compound)))
-    for word in _WORD_RE.findall(_COMPOUND_RE.sub(" ", query)):
+        if jargon(compound):
+            terms.append(" ".join(_WORD_RE.findall(compound)))
+    rest = _COMPOUND_RE.sub(lambda m: " " if jargon(m[0]) else m[0], query)
+    for word in _WORD_RE.findall(rest):
         if word in STOPWORDS or len(word) < 2:
             continue
         # Crude plural folding; the trailing '*' makes it a prefix match ("flow" → "flows").
@@ -215,6 +223,23 @@ def search(
             hits[h] = replace(hits[h], line=closest + 1, snippet=snippet)
 
     return hits
+
+
+def merge(*rankings: list[Hit]) -> list[Hit]:
+    """Searches of the same notes merged by reciprocal rank fusion, one hit per section:
+    as the first search that found it has it, with the chunks every search scored."""
+    scores: dict[int, float] = {}
+    merged: dict[int, Hit] = {}
+    for hits in rankings:
+        for rank, hit in enumerate(hits):
+            scores[hit.section] = scores.get(hit.section, 0.0) + 1 / (RRF_K + rank + 1)
+            if hit.section not in merged:
+                merged[hit.section] = replace(hit, chunks=list(hit.chunks))
+            else:
+                kept = merged[hit.section].chunks
+                kept += [c for c in hit.chunks if c not in kept]
+    ranked = sorted(merged.values(), key=lambda h: -scores[h.section])
+    return [replace(h, score=scores[h.section]) for h in ranked]
 
 
 def _fold(text: str) -> str:

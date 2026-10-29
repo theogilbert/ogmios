@@ -33,7 +33,9 @@ Everything runs on the CPU. No server, no GPU, nothing in memory between questio
   accent-insensitive; `NET-881`-like jargon is matched as a phrase) and semantic search
   (`multilingual-e5-small`, cross-lingual), merged with reciprocal rank fusion and
   grouped by day. Time expressions in English or French ("yesterday", "last week", "il y
-  a deux semaines", "in March 2024", "14 mars") restrict it to that period; asked with no
+  a deux semaines", "in March 2024", "14 mars", "between March and May 2024", "depuis
+  septembre", "la semaine du 14 mars", "Q1 2024", "l'été dernier", "last weekend")
+  restrict it to that period; asked with no
   topic, as in "what did I do last week?", the period's days are read in full.
 - **Embedding model.** Run with ONNX Runtime directly. Loading the tokenizer is most of
   its load time; its 250k-word multilingual vocabulary is pruned once to the Latin script,

@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from . import hub
+from .dates import find_dates
 from .search import Hit
 from .when import Period
 
@@ -287,6 +288,24 @@ def cited(answer: str, excerpts: list[Excerpt]) -> list[Excerpt]:
     return [e for i, e in enumerate(excerpts, 1) if i in numbers]
 
 
+def unknown_dates(answer: str, excerpts: list[Excerpt]) -> list[str]:
+    """The dates written in the answer that are neither the day of an excerpt nor written
+    in one: a small model sometimes gets a date wrong while citing the right excerpt."""
+    known: set[tuple[int | None, int, int]] = set()
+    for e in excerpts:
+        if e.date:
+            day = date.fromisoformat(e.date)
+            known.add((day.year, day.month, day.day))
+        known.update((m.year, m.month, m.day) for m in find_dates(e.text))
+    # A date written without its year matches the same day of any year.
+    known.update((None, month, day) for _, month, day in list(known))
+    return [
+        answer[m.start : m.end]
+        for m in find_dates(answer)
+        if (m.year, m.month, m.day) not in known
+    ]
+
+
 def result(question: str, answer: str, excerpts: list[Excerpt]) -> dict:
     """What `ogmios ask --json` prints: every excerpt read, numbered as the answer cites
     them, and whether it does."""
@@ -294,6 +313,10 @@ def result(question: str, answer: str, excerpts: list[Excerpt]) -> dict:
     return {
         "question": question,
         "answer": answer,
+        "warnings": [
+            f"{d} is not a date of the notes read"
+            for d in unknown_dates(answer, excerpts)
+        ],
         "excerpts": [
             {
                 "n": i,

@@ -117,6 +117,24 @@ def test_json_result():
     ]
 
 
+def test_unknown_dates():
+    excerpts = [
+        ask.Excerpt(
+            "f.md", 1, "2024-03-14", "", "- asked for flows, deadline 2024-05-01"
+        ),
+        ask.Excerpt("f.md", 9, "2024-04-09", "", "- approved"),
+    ]
+    answer = (
+        "Asked on 2024-03-15 [1], due 2024-05-01 [1], approved on April 9, 2024 [2]"
+        " (le 14 mars, before 10 avril 2024)."
+    )
+    assert ask.unknown_dates(answer, excerpts) == ["2024-03-15", "10 avril 2024"]
+    assert ask.result("q", answer, excerpts)["warnings"] == [
+        "2024-03-15 is not a date of the notes read",
+        "10 avril 2024 is not a date of the notes read",
+    ]
+
+
 def test_messages_number_the_excerpts():
     excerpts = [ask.Excerpt("f.md", 1, "2024-01-01", "", "- did a thing")]
     system, user = ask.messages("what?", excerpts, date(2024, 1, 2))

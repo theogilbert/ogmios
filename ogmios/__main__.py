@@ -286,7 +286,12 @@ def _ask(
             spinner.stop()
         written.append(piece)
         print(piece, end="", flush=True)
-    print()
+    print(flush=True)  # before the warnings, which go to stderr
+    for wrong in ask.unknown_dates("".join(written), excerpts):
+        print(
+            f"ogmios: {wrong} is not a date of the notes read, check it",
+            file=sys.stderr,
+        )
     sources = ask.cited("".join(written), excerpts)
     if sources:
         print()

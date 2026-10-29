@@ -109,6 +109,16 @@ def find_date(text: str, day_first: bool = True) -> DateMatch | None:
     return None
 
 
+def find_dates(text: str) -> list[DateMatch]:
+    """Every date in the text, in order."""
+    found = []
+    while (m := find_date(text)) is not None:
+        found.append(m)
+        # Hidden, to look for the next one; positions stay the same.
+        text = text[: m.start] + " " * (m.end - m.start) + text[m.end :]
+    return sorted(found, key=lambda m: m.start)
+
+
 def delimiter_candidate(
     index: int, line: str, day_first: bool = True
 ) -> Delimiter | None:

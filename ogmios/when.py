@@ -10,7 +10,7 @@ import re
 from dataclasses import dataclass
 from datetime import date, timedelta
 
-from .dates import MONTHS, DateMatch, find_date
+from .dates import MONTHS, DateMatch, find_date, find_dates
 
 _NUMBERS = {
     "a": 1, "an": 1, "one": 1, "un": 1, "une": 1, "two": 2, "deux": 2,
@@ -104,13 +104,7 @@ def _resolve_day(m: DateMatch, today: date) -> date | None:
 
 def _date_at(query: str, pos: int) -> DateMatch | None:
     """The date written at `pos`, if any."""
-    masked = query
-    while (m := find_date(masked)) is not None:
-        if m.start == pos:
-            return m
-        # Found elsewhere: hidden, to look for the next one.
-        masked = masked[: m.start] + " " * (m.end - m.start) + masked[m.end :]
-    return None
+    return next((m for m in find_dates(query) if m.start == pos), None)
 
 
 def _point(

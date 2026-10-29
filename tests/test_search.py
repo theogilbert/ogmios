@@ -1,5 +1,6 @@
 """Keyword-only search end to end; the embedding model is not loaded in unit tests."""
 
+from datetime import date
 from pathlib import Path
 
 import numpy as np
@@ -7,7 +8,8 @@ import pytest
 
 from ogmios import store
 from ogmios.config import Source
-from ogmios.search import is_about_anything, notes_in, query_terms, search
+from ogmios.search import is_about_anything, query_terms, search
+from ogmios.when import Period
 
 FIXTURE = Path(__file__).parent / "fixtures" / "done.md"
 
@@ -37,7 +39,7 @@ def test_query_terms_drop_stopwords_and_fold_plurals():
 
 
 def test_one_hit_per_day_positioned_on_matching_line(db):
-    hits = search(db, None, "RESEAU-4512", sort="date")
+    hits = sorted(search(db, None, "RESEAU-4512"), key=lambda h: h.date or "")
     assert [h.date for h in hits] == ["2022-04-04", "2022-04-11", "2022-04-19"]
     first = hits[0]
     assert "RESEAU-4512" in first.snippet
@@ -50,11 +52,6 @@ def test_accents_are_folded(db):
 
 def test_compounds_are_phrases():
     assert query_terms("srv-sftp-part01 and NET-881") == ["srv sftp part01", "net 881"]
-
-
-def test_sort_by_date(db):
-    hits = search(db, None, "NET-881", sort="date")
-    assert [h.date for h in hits] == ["2024-03-14", "2024-04-02", "2024-04-09"]
 
 
 def test_unchanged_index_is_not_stale(db):
@@ -71,20 +68,10 @@ def test_summary_and_changes(db, tmp_path):
     assert store.changed_files(db, {}) == {str(FIXTURE.resolve())}
 
 
-def test_notes_in_a_period(db):
-    from datetime import date
-
-    from ogmios.when import Period
-
+def test_period_restricts_the_search(db):
     day = date(2022, 4, 11)
-    hits = notes_in(db, Period(day, day, "yesterday"))
-    assert [h.snippet for h in hits] == [
-        "- Relance équipe réseau sur RESEAU-4512, toujours en attente de validation sécu",
-        "- Point avec Julie sur le planning du sprint",
-    ]
-    empty = date(2022, 4, 12)
-    assert notes_in(db, Period(empty, empty, "yesterday")) == []
-    assert search(db, None, "RESEAU-4512", period=Period(day, day, ""))[0].line == 24
+    hits = search(db, None, "RESEAU-4512", period=Period(day, day, ""))
+    assert [(h.date, h.line) for h in hits] == [("2022-04-11", 24)]
 
 
 def test_queries_about_anything():

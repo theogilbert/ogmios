@@ -1,24 +1,23 @@
 # ogmios
 
-Local search over markdown notes, for when you remember the idea but not the words you
-used, or the language you wrote it in.
+Questions about your markdown notes, answered by a small local LLM from the days it
+finds, in English or French, whatever the language you wrote them in.
 
 ```
-$ ogmios search "when did I request network flows between the sftp server and airflow?"
-~/work/done.md:19:1:2022-04-04 │ - Ouverture de flux demandée entre srv-sftp-part01 et le cluster Airflow, ticket RESEAU-4512
-~/work/done.md:94:1:2024-03-14 │ Asked the network team to open flows from the new k8s cluster to the partner SFTP
-...
+$ ogmios ask "pourquoi le DAG partner_files_ingest a échoué en janvier 2023 ?"
+ogmios: reading 3 excerpts, 2023-01-03 to 2023-01-09
+À cause d'une rotation de la clé SSH côté partenaire non communiquée [2].
+
+~/work/done.md:44:1:2023-01-05 │ [2]
 ```
 
-Everything runs on the CPU. No server, no GPU, nothing in memory between searches.
+Everything runs on the CPU. No server, no GPU, nothing in memory between questions.
 
 | | |
 |---|---|
-| Model on disk | 135 MB, downloaded by `ogmios setup` from Hugging Face (pinned revision), then never fetched again |
+| Models on disk | 135 MB (embeddings) and 3.3 GB (LLM), downloaded by `ogmios setup` from Hugging Face (pinned revisions), then never fetched again |
 | First full index, ~11k lines | ~30 s, ~750 MB peak |
-| Search | ~0.6 s, ~420 MB peak, then the process exits |
-| `--keyword` search | ~0.1 s, ~40 MB |
-| `ask` (LLM, 3.3 GB on disk) | ~5–15 s, ~1.5 GB plus the model file mapped from disk |
+| `ask` | ~5–15 s, ~1.5 GB plus the LLM file mapped from disk, then the process exits |
 
 ## How it works
 
@@ -30,23 +29,29 @@ Everything runs on the CPU. No server, no GPU, nothing in memory between searche
   top-level block (a `> project` or `- project` with what is indented under it), and each
   pair of adjacent blocks, so that a topic running across two items is still found. Chunks
   carry their date as context.
-- **Search.** Keyword search (SQLite FTS5, accent-insensitive; `NET-881`-like jargon is
-  matched as a phrase) and semantic search (`multilingual-e5-small`, cross-lingual) are
-  merged with reciprocal rank fusion. Results are grouped by day, one line each, pointing
-  at the best matching line.
-- **Model.** Run with ONNX Runtime directly. Loading the tokenizer is most of a search's
-  time; its 250k-word multilingual vocabulary is pruned once to the Latin script, which
-  tokenizes French and English text exactly as before at a third of the cost. ONNX
+- **Search.** The days to read are found by keyword search (SQLite FTS5,
+  accent-insensitive; `NET-881`-like jargon is matched as a phrase) and semantic search
+  (`multilingual-e5-small`, cross-lingual), merged with reciprocal rank fusion and
+  grouped by day. Time expressions in English or French ("yesterday", "last week", "il y
+  a deux semaines", "in March 2024", "14 mars") restrict it to that period; asked with no
+  topic, as in "what did I do last week?", the period's days are read in full.
+- **Embedding model.** Run with ONNX Runtime directly. Loading the tokenizer is most of
+  its load time; its 250k-word multilingual vocabulary is pruned once to the Latin script,
+  which tokenizes French and English text exactly as before at a third of the cost. ONNX
   Runtime's usage telemetry is turned off (`ORT_DISABLE_TELEMETRY`).
-- **Freshness.** `search` re-indexes first when a file changed. Only new or edited text is
+- **Answer.** The best days (up to `-n/--days`, 8 by default, ~2.5k tokens) are handed to
+  [Gemma 4 E2B](https://huggingface.co/google/gemma-4-E2B-it-qat-q4_0-gguf), run
+  in-process with llama.cpp, told to answer only from them, cite them, and say when they
+  do not hold the answer. Its file is memory-mapped, so it loads in about a second; most
+  of the wait is the model reading the notes, at ~170 tokens/s on a 6-core laptop CPU.
+- **Freshness.** `ask` re-indexes first when a file changed. Only new or edited text is
   re-embedded, so this is near-instant after the first run.
 
 ## Install
 
 ```sh
 uv tool install --editable ~/projects/ogmios  # compiles llama.cpp: needs a C++ compiler and cmake, ~3 min
-ogmios setup             # downloads the models, writes them to the config
-ogmios setup --no-llm    # the same without the LLM (3.3 GB), if you will not use `ask`
+ogmios setup             # downloads the models (3.4 GB), writes them to the config
 ```
 
 Nothing is downloaded behind your back: a command whose model is missing fails and
@@ -73,7 +78,7 @@ These edit `~/.config/ogmios/config.toml` in place, keeping its comments. By han
 ```toml
 # model = "e5-small-int8"   # or "e5-small" (fp32, 470 MB, same results, slower)
 #                           # or "e5-base-int8" (280 MB, ~40% slower, ~600 MB peak)
-# llm = "gemma-4-e2b"       # for `ogmios ask`
+# llm = "gemma-4-e2b"
 
 [[sources]]
 path = "~/work/done.md"
@@ -97,53 +102,25 @@ ogmios inspect ~/work/done.md --chunks   # and what gets embedded
 ## Use
 
 ```sh
-ogmios index                         # first run: embeds everything
-ogmios search "..."                  # best match first
-ogmios search --sort date "..."      # the same hits, as a timeline
-ogmios search --keyword "NET-881"    # keywords only, no model load (~0.1s)
-ogmios search --json "..."           # one JSON object per line
+ogmios index                         # first run: embeds everything (ask also does it)
+ogmios ask "..."
+ogmios ask --prompt "..."            # what the model would be given, without running it
 ```
 
-Time expressions in English or French ("yesterday", "last week", "il y a deux semaines",
-"in March 2024", "14 mars") restrict the search to that period, shown on stderr. Asked
-with no topic, as in "what did I do yesterday", the period's notes are listed in order,
-or nothing if there are none.
+A 2B model reading excerpts can still misread them, or miss one of two answers: check
+the cited lines, printed after the answer. They are grep-like (`path:line:col:text`), so
+any picker can open them.
 
-`ogmios status` shows where the config, index and model are stored, what each source
+`ogmios status` shows where the config, index and models are stored, what each source
 matches, and whether the index is up to date.
 
-`-s/--source PATH` searches a file or directory instead of the configured sources.
+`-s/--source PATH` reads a file or directory instead of the configured sources.
 `OGMIOS_CONFIG` and `OGMIOS_DB` override the config and index locations.
-
-The output is grep-like (`path:line:col:text`), so any picker can open the results. In
-Neovim: `utilities.search.notes()` (fzf-lua).
-
-## Ask
-
-```
-$ ogmios ask "pourquoi le DAG partner_files_ingest a échoué en janvier 2023 ?"
-ogmios: reading 3 excerpts, 2023-01-03 to 2023-01-09
-À cause d'une rotation de la clé SSH côté partenaire non communiquée [2].
-
-~/work/done.md:44:1:2023-01-05 │ [2]
-```
-
-`ogmios ask` answers a question in a sentence or two, citing the days it read. It runs
-the search above, hands the best days (up to `-n/--days`, 8 by default, ~2.5k tokens) to
-[Gemma 4 E2B](https://huggingface.co/google/gemma-4-E2B-it-qat-q4_0-gguf), a small LLM,
-in-process with llama.cpp, then exits. The model file is memory-mapped, so it loads in
-about a second; most of the wait is the model reading the notes, at ~170 tokens/s on a
-6-core laptop CPU. Time expressions work as in `search`: "what did I do last week?"
-reads that week's notes. Answers are in the language of the question.
-
-A 2B model reading excerpts can still misread them: check the cited lines, printed after
-the answer in the same grep-like format. `--prompt` prints what the model is given
-instead of running it.
 
 ## Development
 
 ```sh
 uv sync --group dev
 make ci                                  # ruff, ty, pytest
-uv run python scripts/eval.py            # retrieval benchmark, per model
+uv run python scripts/eval.py            # retrieval benchmark, per embedding model
 ```

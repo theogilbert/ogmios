@@ -1,7 +1,7 @@
 [project]
 name = "ogmios"
 version = "0.1.0"
-description = "Local hybrid (keyword + semantic) search over markdown notes"
+description = "Questions about your markdown notes, answered by a local LLM"
 readme = "README.md"
 requires-python = ">=3.13"
 authors = [
@@ -9,7 +9,7 @@ authors = [
 ]
 license = "GPL-3.0-or-later"
 license-files = ["LICENSE"]
-keywords = ["notes", "search", "markdown", "embeddings", "neovim"]
+keywords = ["notes", "markdown", "llm", "embeddings", "search"]
 dependencies = [
     "numpy>=2",
     "onnxruntime>=1.22",

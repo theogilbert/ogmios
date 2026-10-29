@@ -132,7 +132,6 @@ def search(
     embedder: Embedder | None,
     query: str,
     limit: int = 20,
-    sort: str = "score",
     period: Period | None = None,
 ) -> list[Hit]:
     terms = query_terms(query)
@@ -208,31 +207,6 @@ def search(
             snippet = file_lines[hits[h].path][closest].strip()
             hits[h] = replace(hits[h], line=closest + 1, snippet=snippet)
 
-    if sort == "date":
-        hits.sort(key=lambda h: (h.date or "", h.path, h.line))
-    return hits
-
-
-def notes_in(db: sqlite3.Connection, period: Period) -> list[Hit]:
-    """Every line written in the period, oldest first."""
-    condition, params = _period_filter(period)
-    sections = db.execute(
-        "SELECT path, start_line, end_line, title, date FROM sections s"
-        f" WHERE {condition} ORDER BY date, path, start_line",
-        params,
-    ).fetchall()
-    file_lines: dict[str, list[str]] = {}
-    hits = []
-    for path, start, end, title, date in sections:
-        if path not in file_lines:
-            file_lines[path] = (
-                Path(path).read_text(encoding="utf-8", errors="replace").splitlines()
-            )
-        lines = file_lines[path]
-        # The header line is the date itself, already shown on every hit.
-        for i in range(start + 1, min(end, len(lines))):
-            if lines[i].strip():
-                hits.append(Hit(path, i + 1, title, date, lines[i].strip(), 0.0))
     return hits
 
 

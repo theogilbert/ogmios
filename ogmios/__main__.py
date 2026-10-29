@@ -1,18 +1,16 @@
 import argparse
-import json
 import os
 import re
 import shlex
 import subprocess
 import sys
-from dataclasses import asdict
 from datetime import date
 from pathlib import Path
 
 from . import ask, config, hub, store
 from .embed import MODELS, Embedder
 from .parse import SplitOptions, chunk_section, parse_file
-from .search import is_about_anything, notes_in, search
+from .search import is_about_anything, search
 from .when import find_period
 
 
@@ -28,7 +26,7 @@ def main() -> None:
 
 
 def parse_cli_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(prog="ogmios", description="Search your notes.")
+    parser = argparse.ArgumentParser(prog="ogmios", description="Ask your notes.")
     parser.add_argument(
         "--config", type=Path, default=config.config_path(), help="config file"
     )
@@ -43,7 +41,7 @@ def parse_cli_args() -> argparse.Namespace:
         "--source",
         action="append",
         type=Path,
-        help="file or directory to search, instead of the configured sources (repeatable)",
+        help="file or directory of notes, instead of the configured sources (repeatable)",
     )
     parser.add_argument("--model", choices=sorted(MODELS), help="embedding model")
     commands = parser.add_subparsers(required=True)
@@ -52,10 +50,7 @@ def parse_cli_args() -> argparse.Namespace:
         "setup",
         help="download the models and configure ogmios to use them",
         description="Download the embedding model (--model, else the configured one)"
-        " and the LLM for `ogmios ask`, then write both to the config file.",
-    )
-    setup.add_argument(
-        "--no-llm", action="store_true", help="skip the LLM (several GB)"
+        " and the LLM, then write both to the config file.",
     )
     setup.set_defaults(func=cmd_setup)
 
@@ -65,26 +60,9 @@ def parse_cli_args() -> argparse.Namespace:
     )
     index.set_defaults(func=cmd_index)
 
-    find = commands.add_parser(
-        "search", help="search the notes (refreshes the index first)"
-    )
-    find.add_argument("query", nargs="+")
-    find.add_argument(
-        "-n",
-        "--limit",
-        type=int,
-        help="number of results (default: 20, all when listing a period's notes)",
-    )
-    find.add_argument("--sort", choices=["score", "date"], default="score")
-    find.add_argument("--json", action="store_true", help="one JSON object per line")
-    find.add_argument(
-        "--keyword", action="store_true", help="keyword search only (no model, instant)"
-    )
-    find.set_defaults(func=cmd_search)
-
     question = commands.add_parser(
         "ask",
-        help="answer a question from the notes, with a local LLM",
+        help="answer a question from the notes (refreshes the index first)",
     )
     question.add_argument("question", nargs="+")
     question.add_argument(
@@ -147,9 +125,7 @@ def parse_cli_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _setup(
-    args: argparse.Namespace, model_needed: bool = True
-) -> tuple[config.Config, Embedder]:
+def _setup(args: argparse.Namespace) -> tuple[config.Config, Embedder]:
     cfg = config.load(args.config)
     if args.source:
         cfg.sources = [config.Source(path=p.expanduser()) for p in args.source]
@@ -159,7 +135,7 @@ def _setup(
         )
     embedder = Embedder(args.model or cfg.model, config.cache_dir() / "models")
     # Before the index is touched, rather than halfway through re-embedding it.
-    if model_needed and not embedder.downloaded:
+    if not embedder.downloaded:
         raise ValueError(
             f"embedding model {embedder.name} is not installed, run `ogmios setup`"
         )
@@ -188,7 +164,7 @@ def cmd_setup(args: argparse.Namespace) -> None:
     cfg = config.load(args.config)
     models = config.cache_dir() / "models"
     embedder = Embedder(args.model or cfg.model, models)
-    spec = embedder.spec
+    spec, llm = embedder.spec, ask.LLMS[cfg.llm]
     wanted = [
         (
             f"embedding model {embedder.name}",
@@ -196,14 +172,15 @@ def cmd_setup(args: argparse.Namespace) -> None:
             spec.revision,
             embedder.dir,
             embedder.files,
-        )
+        ),
+        (
+            f"LLM {cfg.llm}",
+            llm.repo,
+            llm.revision,
+            hub.model_dir(models, llm.repo, llm.revision),
+            [llm.model_file],
+        ),
     ]
-    if not args.no_llm:
-        llm = ask.LLMS[cfg.llm]
-        directory = hub.model_dir(models, llm.repo, llm.revision)
-        wanted.append(
-            (f"LLM {cfg.llm}", llm.repo, llm.revision, directory, [llm.model_file])
-        )
 
     for what, repo, revision, directory, files in wanted:
         print(f"{what}  (huggingface.co/{repo})")
@@ -224,46 +201,16 @@ def cmd_setup(args: argparse.Namespace) -> None:
             hub.download(repo, revision, f, directory)
 
     config.set_value(args.config, "model", embedder.name)
-    settings = f'model = "{embedder.name}"'
-    if not args.no_llm:
-        config.set_value(args.config, "llm", cfg.llm)
-        settings += f', llm = "{cfg.llm}"'
-    print(f"\nset {settings} in {config.tilde(args.config)}")
+    config.set_value(args.config, "llm", cfg.llm)
+    print(
+        f'\nset model = "{embedder.name}", llm = "{cfg.llm}"'
+        f" in {config.tilde(args.config)}"
+    )
 
 
 def cmd_index(args: argparse.Namespace) -> None:
     cfg, embedder = _setup(args)
     _refresh(args, cfg, embedder, force=args.force)
-
-
-def cmd_search(args: argparse.Namespace) -> None:
-    cfg, embedder = _setup(args, model_needed=not args.keyword)
-    query = " ".join(args.query)
-    period = None
-    if found := find_period(query, date.today()):
-        period, query = found
-    if period and is_about_anything(query):
-        # "What did I do yesterday": the period's notes, no ranking, no model.
-        db = _refresh(args, cfg, embedder)
-        hits = notes_in(db, period)[: args.limit]
-        found = "notes from" if hits else "no notes on"
-        print(f"ogmios: {found} {period} ({period.words})", file=sys.stderr)
-    else:
-        if period:
-            print(f"ogmios: searching {period} ({period.words})", file=sys.stderr)
-        limit = args.limit or 20
-        if args.keyword:
-            db = store.connect(args.db)
-            hits = search(db, None, query, limit, args.sort, period)
-        else:
-            db = _refresh(args, cfg, embedder)
-            hits = search(db, embedder, query, limit, args.sort, period)
-    for hit in hits:
-        if args.json:
-            print(json.dumps(asdict(hit), ensure_ascii=False))
-        else:
-            # grep-like, so that any picker can open the location
-            print(f"{hit.path}:{hit.line}:1:{hit.date or hit.title} │ {hit.snippet}")
 
 
 def cmd_ask(args: argparse.Namespace) -> None:

@@ -4,7 +4,7 @@ then grouped by section so that each day appears once."""
 import re
 import sqlite3
 import unicodedata
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import numpy as np
@@ -55,6 +55,9 @@ class Hit:
     date: str | None
     snippet: str
     score: float
+    section: int = 0  # its id in the index
+    # The section's chunks that scored, best first: (kind, start, end), lines 0-based.
+    chunks: list[tuple[str, int, int]] = field(default_factory=list)
 
 
 def query_terms(query: str) -> list[str]:
@@ -156,23 +159,26 @@ def search(
 
     placeholders = ",".join("?" * len(chunk_scores))
     rows = db.execute(
-        "SELECT c.id, c.start_line, c.end_line, s.id, s.path, s.title, s.date, s.start_line"
+        "SELECT c.id, c.start_line, c.end_line, s.id, s.path, s.title, s.date,"
+        " s.start_line, c.kind"
         f" FROM chunks c JOIN sections s ON s.id = c.section_id WHERE c.id IN ({placeholders})",
         list(chunk_scores),
     ).fetchall()
 
     # One hit per section, positioned on its best chunk.
     best: dict[int, tuple[float, tuple]] = {}
+    scored: dict[int, list[tuple[float, tuple[str, int, int]]]] = {}
     for row in rows:
         score = chunk_scores[row[0]]
         if row[3] not in best or score > best[row[3]][0]:
             best[row[3]] = (score, row)
+        scored.setdefault(row[3], []).append((score, (row[8], row[1], row[2])))
 
     ranked = sorted(best.values(), key=lambda item: -item[0])[:limit]
     file_lines: dict[str, list[str]] = {}
     hits = []
     unmatched: list[tuple[int, list[int]]] = []  # hit, and its lines to choose from
-    for score, (_, start, end, _, path, title, date, header) in ranked:
+    for score, (_, start, end, section, path, title, date, header, _) in ranked:
         if path not in file_lines:
             file_lines[path] = (
                 Path(path).read_text(encoding="utf-8", errors="replace").splitlines()
@@ -190,7 +196,8 @@ def search(
         if not matched:
             unmatched.append((len(hits), content))
         snippet = lines[line].strip() if line < len(lines) else ""
-        hits.append(Hit(path, line + 1, title, date, snippet, score))
+        chunks = [c for _, c in sorted(scored[section], key=lambda item: -item[0])]
+        hits.append(Hit(path, line + 1, title, date, snippet, score, section, chunks))
 
     if embedder is not None and q is not None and unmatched:
         # No query word on any line: point at the line closest in meaning.

@@ -59,6 +59,20 @@ def test_budget_keeps_the_best(db, monkeypatch):
     assert "2022-04-19" in [e.date for e in excerpts]
 
 
+def test_tight_budget_takes_the_matching_part_of_more_days(db, monkeypatch):
+    # Room for the best line of each day, then the next ones round by round, but not
+    # for all three days in full (470 characters).
+    monkeypatch.setattr(ask, "BUDGET_CHARS", 430)
+    excerpts = ask.excerpts_for(db, search(db, None, "RESEAU-4512"))
+    assert sum(len(e.text) for e in excerpts) <= 430
+    assert [e.date for e in excerpts] == ["2022-04-04", "2022-04-11", "2022-04-19"]
+    first = excerpts[0]
+    assert first.text.startswith("- Ouverture de flux demandée")
+    assert first.text.endswith("…")  # the rest of the day is left out, and says so
+    lines = FIXTURE.read_text().splitlines()
+    assert "RESEAU-4512" in lines[first.line - 1]
+
+
 def test_long_day_is_cut_around_the_focus():
     lines = [f"line {i:02}" for i in range(100)]  # 8 characters each
     first, last = ask._window(lines, 50, 90)

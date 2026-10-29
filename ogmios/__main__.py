@@ -68,7 +68,11 @@ def parse_cli_args() -> argparse.Namespace:
     )
     question.add_argument("question", nargs="+")
     question.add_argument(
-        "-n", "--days", type=int, default=8, help="most days of notes to read"
+        "-n",
+        "--days",
+        type=int,
+        default=20,
+        help="most days of notes to read, as many as fit (default: 20)",
     )
     question.add_argument(
         "--prompt",

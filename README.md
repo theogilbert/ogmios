@@ -41,10 +41,16 @@ Everything runs on the CPU. No server, no GPU, nothing in memory between questio
   its load time; its 250k-word multilingual vocabulary is pruned once to the Latin script,
   which tokenizes French and English text exactly as before at a third of the cost. ONNX
   Runtime's usage telemetry is turned off (`ORT_DISABLE_TELEMETRY`).
-- **Answer.** The best days (up to `-n/--days`, 8 by default, ~2.5k tokens) are handed to
+- **Excerpts.** Of the best days (up to `-n/--days`, 20 by default), the model is given
+  6000 characters (~2.5k tokens): first the item that matched best in each day, for as
+  many days as fit in 60% of that, then more of those days, an item at a time and round
+  after round: their other items that matched, then the items around them. Lines left
+  out are marked `…`. Asked about a period with no topic, it gets the period's days whole.
+- **Answer.** The excerpts are handed to
   [Gemma 4 E2B](https://huggingface.co/google/gemma-4-E2B-it-qat-q4_0-gguf), run
-  in-process with llama.cpp, told to answer only from them, cite them, and say when they
-  do not hold the answer. Its file is memory-mapped, so it loads in about a second; most
+  in-process with llama.cpp, told to answer only from them, mention every excerpt that
+  answers, cite them at the end of each sentence, and say when they do not hold the
+  answer. Its file is memory-mapped, so it loads in about a second; most
   of the wait is the model reading the notes, at ~170 tokens/s on a 6-core laptop CPU.
 - **Freshness.** `ask` re-indexes first when a file changed. Only new or edited text is
   re-embedded, so this is near-instant after the first run.

@@ -44,11 +44,16 @@ CONTEXT_TOKENS = 4096
 # on a laptop CPU: most of the time to the answer.
 BUDGET_CHARS = 6_000
 EXCERPT_CHARS = 2_500  # a long day is cut down to the lines around the hit
+# What the best part of each day may take, at most; the rest goes to more of the best
+# days, whose other parts may hold the answer when their best one only shares its words.
+BREADTH_SHARE = 0.6
 
 SYSTEM = """\
 You answer questions about the user's own notes, using only the excerpts given.
-Today is {today}. Each excerpt starts with its number in brackets and the day it was written.
-Cite the excerpts you use, like [2]. If they do not hold the answer, say so: never guess.
+Today is {today}. Each excerpt starts with its number in brackets and the day it was written; "…" marks lines left out.
+If several excerpts answer the question, mention each of them, with its date.
+End each sentence with the numbers of the excerpts it comes from, like [2] or [2, 5].
+If the excerpts do not hold the answer, say so: never guess.
 Answer briefly, in {language}."""
 
 
@@ -62,17 +67,119 @@ class Excerpt:
 
 
 def excerpts_for(db: sqlite3.Connection, hits: list[Hit]) -> list[Excerpt]:
-    """The day around each hit, taken best first until the budget is spent."""
-    found = []
-    for hit in hits:
+    """Of each day found, the part that matches best, for as many days as fit; then,
+    with what budget is left, more of each day, a part at a time, round after round:
+    its other parts that matched, then the items around them. Round by round, so that
+    a day's second part, which may be the one that answers, comes before a third."""
+    file_lines: dict[str, list[str]] = {}
+    days = [day for hit in hits if (day := _Day.of(db, hit, file_lines))]
+    breadth = int(BUDGET_CHARS * BREADTH_SHARE)
+    chosen = []
+    for day in days:
+        if (size := len(day.text())) > breadth:
+            break  # not a smaller, worse day instead
+        chosen.append(day)
+        breadth -= size
+    left = BUDGET_CHARS - sum(len(day.text()) for day in chosen)
+    pending = [(day, day.more()) for day in chosen]
+    while pending:
+        still = []
+        for day, more in pending:
+            # The next part of this day that fits, if any: it stays for another round.
+            for lines in more:
+                grown = len(day.text(lines)) - len(day.text())
+                if 0 < grown <= left:
+                    day.selected |= lines
+                    left -= grown
+                    still.append((day, more))
+                    break
+        pending = still
+    excerpts = [day.excerpt() for day in chosen]
+    # In the order they were written: "when" is easier to answer from a timeline.
+    return sorted(excerpts, key=lambda e: (e.date or "", e.path, e.line))
+
+
+class _Day:
+    """A day found by the search, and the lines of it selected so far."""
+
+    def __init__(self, hit: Hit, lines: list[str], header: int, end: int, items: list):
+        self.hit, self.lines, self.header, self.end = hit, lines, header, end
+        self.items = items  # (start, end) of its top-level items, if it has several
+        focus = hit.line - 1
+        finer = [(s, e) for kind, s, e in hit.chunks if kind != "section"]
+        if finer:
+            first = finer[0]
+            # A pair of items: the one holding the focus first, the other later.
+            within = [(s, e) for s, e in items if first[0] <= s and e <= first[1]]
+            if len(within) > 1:
+                first = next(((s, e) for s, e in within if s <= focus < e), within[0])
+                finer.insert(1, (finer[0][0], finer[0][1]))
+        else:
+            # Only the day as a whole matched: the item holding the focus, else the day.
+            first = next(
+                ((s, e) for s, e in items if s <= focus < e), (header + 1, end)
+            )
+        self.selected = self._capped(*first, focus)
+        self.matched = [set(range(s, e)) for s, e in finer[1:]]
+
+    @classmethod
+    def of(cls, db: sqlite3.Connection, hit: Hit, file_lines: dict) -> "_Day | None":
         row = db.execute(
-            "SELECT start_line, end_line FROM sections"
-            " WHERE path = ? AND start_line < ? AND ? <= end_line",
-            (hit.path, hit.line, hit.line),
+            "SELECT start_line, end_line FROM sections WHERE id = ?", (hit.section,)
         ).fetchone()
-        if row is not None:
-            found.append((hit.path, row[0], row[1], hit.title, hit.date, hit.line - 1))
-    return _excerpts(found)
+        if row is None:
+            return None
+        items = db.execute(
+            "SELECT start_line, end_line FROM chunks WHERE section_id = ?"
+            " AND kind IN ('block', 'window') ORDER BY start_line",
+            (hit.section,),
+        ).fetchall()
+        if hit.path not in file_lines:
+            file_lines[hit.path] = (
+                Path(hit.path)
+                .read_text(encoding="utf-8", errors="replace")
+                .splitlines()
+            )
+        return cls(hit, file_lines[hit.path], row[0], row[1], items)
+
+    def more(self) -> Iterator[set[int]]:
+        """Lines worth adding, most useful first: other parts that matched, then the
+        items nearest to what is selected."""
+        yield from self.matched
+        centre = sum(self.selected) / len(self.selected) if self.selected else 0
+        for s, e in sorted(self.items, key=lambda item: abs(sum(item) / 2 - centre)):
+            yield set(range(s, e))
+
+    def text(self, extra: frozenset[int] | set[int] = frozenset()) -> str:
+        """The selected lines, "…" marking the ones left out."""
+        selected = self.selected | extra
+        out: list[str] = []
+        skipped = False
+        for i in range(self.header + 1, min(self.end, len(self.lines))):
+            line = self.lines[i]
+            if not line.strip() or set(line.strip()) <= set("-*_="):
+                continue
+            if i in selected:
+                if skipped:
+                    out.append("…")
+                out.append(line)
+                skipped = False
+            else:
+                skipped = True
+        if skipped and out:
+            out.append("…")
+        return "\n".join(out)
+
+    def excerpt(self) -> Excerpt:
+        hit = self.hit
+        line = hit.line if hit.line - 1 in self.selected else min(self.selected) + 1
+        return Excerpt(hit.path, line, hit.date, hit.title, self.text())
+
+    def _capped(self, start: int, end: int, focus: int) -> set[int]:
+        """The lines from `start` to `end`, cut around `focus` if too long."""
+        lines = self.lines[start:end]
+        first, last = _window(lines, focus - start, EXCERPT_CHARS)
+        return set(range(start + first, start + last))
 
 
 def excerpts_in(db: sqlite3.Connection, period: Period) -> list[Excerpt]:
@@ -234,7 +341,7 @@ def answer(llm: "llama_cpp.Llama", chat: list[dict]) -> Iterator[str]:
     read the notes, most of the wait."""
     stream = llm.create_chat_completion(
         chat,  # ty: ignore[invalid-argument-type]
-        temperature=0.2,
+        temperature=0,  # the same question, the same answer
         stream=True,
     )
     for chunk in stream:

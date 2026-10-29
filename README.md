@@ -105,7 +105,14 @@ ogmios inspect ~/work/done.md --chunks   # and what gets embedded
 ogmios index                         # first run: embeds everything (ask also does it)
 ogmios ask "..."
 ogmios ask --prompt "..."            # what the model would be given, without running it
+ogmios ask --json "..."              # one JSON object, for editor plugins
 ```
+
+`--json` prints, once the answer is written, `{"question", "answer", "excerpts"}`, where
+each excerpt the model read is `{"n", "date", "title", "path", "line", "cited"}`: `n` is
+the number the answer cites it by, `date` is null for a section without one, and `line`
+is 1-based. Progress goes to stderr; on failure, stdout is empty, the message is on
+stderr and the exit status is 1.
 
 A 2B model reading excerpts can still misread them, or miss one of two answers: check
 the cited lines, printed after the answer as `[n] day | path:line`.

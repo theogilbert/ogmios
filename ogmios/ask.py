@@ -176,6 +176,27 @@ def cited(answer: str, excerpts: list[Excerpt]) -> list[Excerpt]:
     return [e for i, e in enumerate(excerpts, 1) if i in numbers]
 
 
+def result(question: str, answer: str, excerpts: list[Excerpt]) -> dict:
+    """What `ogmios ask --json` prints: every excerpt read, numbered as the answer cites
+    them, and whether it does."""
+    sources = cited(answer, excerpts)
+    return {
+        "question": question,
+        "answer": answer,
+        "excerpts": [
+            {
+                "n": i,
+                "date": e.date,  # null for a section without one: see its title
+                "title": e.title,
+                "path": e.path,
+                "line": e.line,
+                "cited": e in sources,
+            }
+            for i, e in enumerate(excerpts, 1)
+        ],
+    }
+
+
 def model_path(name: str, cache_dir: Path) -> Path:
     """Where `ogmios setup` installs the LLM."""
     spec = LLMS[name]

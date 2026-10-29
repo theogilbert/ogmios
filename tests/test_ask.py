@@ -76,6 +76,33 @@ def test_cited_sources():
     assert ask.cited("No idea.", excerpts) == []
 
 
+def test_json_result():
+    excerpts = [
+        ask.Excerpt("/n/done.md", 3, "2024-01-01", "2024-01-01", "x"),
+        ask.Excerpt("/n/ideas.md", 7, None, "Ideas", "y"),
+    ]
+    result = ask.result("when?", "On the 1st [1].", excerpts)
+    assert result["answer"] == "On the 1st [1]."
+    assert result["excerpts"] == [
+        {
+            "n": 1,
+            "date": "2024-01-01",
+            "title": "2024-01-01",
+            "path": "/n/done.md",
+            "line": 3,
+            "cited": True,
+        },
+        {
+            "n": 2,
+            "date": None,
+            "title": "Ideas",
+            "path": "/n/ideas.md",
+            "line": 7,
+            "cited": False,
+        },
+    ]
+
+
 def test_messages_number_the_excerpts():
     excerpts = [ask.Excerpt("f.md", 1, "2024-01-01", "", "- did a thing")]
     system, user = ask.messages("what?", excerpts, date(2024, 1, 2))

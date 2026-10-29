@@ -1,4 +1,5 @@
 import argparse
+import json
 import os
 import re
 import shlex
@@ -72,6 +73,11 @@ def parse_cli_args() -> argparse.Namespace:
         "--prompt",
         action="store_true",
         help="print what the model would be given, without running it",
+    )
+    question.add_argument(
+        "--json",
+        action="store_true",
+        help="print the answer and its sources as one JSON object, once written",
     )
     question.set_defaults(func=cmd_ask)
 
@@ -243,6 +249,10 @@ def cmd_ask(args: argparse.Namespace) -> None:
     dates = sorted(e.date for e in excerpts if e.date)
     span = f", {dates[0]} to {dates[-1]}" if dates else ""
     print(f"ogmios: reading {_plural(len(excerpts), 'excerpt')}{span}", file=sys.stderr)
+    if args.json:
+        text = "".join(ask.answer(model, chat)).strip()
+        print(json.dumps(ask.result(question, text, excerpts), ensure_ascii=False))
+        return
     written = []
     for piece in ask.answer(model, chat):
         written.append(piece)

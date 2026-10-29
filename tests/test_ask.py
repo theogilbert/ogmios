@@ -156,3 +156,36 @@ def test_messages_number_the_excerpts():
 )
 def test_language_of(question, language):
     assert ask.language_of(question) == language
+
+
+GGUF = "google/gemma-4-E4B-it-qat-q4_0-gguf/gemma-4-E4B_q4_0-it.gguf"
+SHA = "0123456789abcdef0123456789abcdef01234567"
+
+
+def test_llm_values():
+    assert ask.llm_spec("gemma-4-e2b") is ask.LLMS["gemma-4-e2b"]
+    spec = ask.llm_spec(GGUF)
+    assert (spec.repo, spec.model_file, spec.revision) == (
+        "google/gemma-4-E4B-it-qat-q4_0-gguf",
+        "gemma-4-E4B_q4_0-it.gguf",
+        None,
+    )
+    assert ask.llm_spec(f"{GGUF}@{SHA}").revision == SHA
+    assert ask.llm_spec(f"org/repo/sub/dir/m.gguf@{SHA}").model_file == "sub/dir/m.gguf"
+    with pytest.raises(ValueError, match="unknown llm"):
+        ask.llm_spec("gpt-5")
+
+
+def test_llm_from_url():
+    blob = "https://huggingface.co/google/gemma-4-E4B-it-qat-q4_0-gguf/blob"
+    assert ask.llm_value(f"{blob}/main/gemma-4-E4B_q4_0-it.gguf") == GGUF
+    assert ask.llm_value(f"{blob}/{SHA}/gemma-4-E4B_q4_0-it.gguf") == f"{GGUF}@{SHA}"
+    assert ask.llm_value("gemma-4-e2b") == "gemma-4-e2b"
+
+
+def test_unpinned_llm_is_not_installed(tmp_path):
+    assert ask.model_path(ask.llm_spec(GGUF), tmp_path) is None
+    path = ask.model_path(ask.llm_spec(f"{GGUF}@{SHA}"), tmp_path)
+    assert path == tmp_path / "google--gemma-4-E4B-it-qat-q4_0-gguf" / SHA / (
+        "gemma-4-E4B_q4_0-it.gguf"
+    )

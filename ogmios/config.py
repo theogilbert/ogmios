@@ -3,7 +3,7 @@
 ~/.config/ogmios/config.toml:
 
     model = "e5-small-int8"          # optional
-    llm = "gemma-4-e2b"              # optional, for `ogmios ask`
+    llm = "gemma-4-e2b"              # optional, or any GGUF file: "REPO/FILE.gguf"
 
     [[sources]]
     path = "~/work/done.md"
@@ -28,7 +28,7 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .ask import DEFAULT_LLM, LLMS
+from .ask import DEFAULT_LLM, llm_spec
 from .embed import DEFAULT_MODEL, MODELS
 from .parse import SplitOptions
 
@@ -103,8 +103,10 @@ def _parse(text: str) -> Config:
             f"unknown model {model!r}, expected one of: {', '.join(MODELS)}"
         )
     llm = raw.get("llm", DEFAULT_LLM)
-    if llm not in LLMS:
-        raise ValueError(f"unknown llm {llm!r}, expected one of: {', '.join(LLMS)}")
+    if not isinstance(llm, str):
+        # A mistake in the file, reported as such by main(), not a bug: ValueError.
+        raise ValueError("llm must be a string, see `ogmios config llm --help`")  # noqa: TRY004
+    llm_spec(llm)
     return Config(sources=sources, model=model, llm=llm)
 
 

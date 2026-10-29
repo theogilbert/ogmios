@@ -15,7 +15,7 @@ Everything runs on the CPU. No server, no GPU, nothing in memory between questio
 
 | | |
 |---|---|
-| Models on disk | 135 MB (embeddings) and 3.3 GB (LLM), downloaded by `ogmios setup` from Hugging Face (pinned revisions), then never fetched again |
+| Models on disk | 135 MB (embeddings) and 3.3 GB (LLM), downloaded by `ogmios install` from Hugging Face (pinned revisions), then never fetched again |
 | First full index, ~11k lines | ~30 s, ~750 MB peak |
 | `ask` | ~5–15 s, ~1.5 GB plus the LLM file mapped from disk, then the process exits |
 
@@ -64,11 +64,11 @@ Everything runs on the CPU. No server, no GPU, nothing in memory between questio
 
 ```sh
 uv tool install --editable ~/projects/ogmios  # compiles llama.cpp: needs a C++ compiler and cmake, ~3 min
-ogmios setup             # downloads the models (3.4 GB), writes them to the config
+ogmios install           # downloads the models (3.4 GB), writes them to the config
 ```
 
 Nothing is downloaded behind your back: a command whose model is missing fails and
-points at `ogmios setup`, which says what it downloads and where before doing it. An
+points at `ogmios install`, which says what it downloads and where before doing it. An
 interrupted download resumes where it stopped on the next run.
 
 ## Configure
@@ -81,7 +81,8 @@ ogmios config add ~/notes --exclude "archive/**" # every **/*.md under a directo
 ogmios config add ~/journal.md --month-first --delimiter '^## \d{4}'
 ogmios config remove ~/notes
 ogmios config model e5-small                     # show or set the embedding model
-                                                 # (then `ogmios setup` installs it)
+ogmios config llm REPO/FILE.gguf                 # show or set the LLM (see below)
+                                                 # (then `ogmios install` installs them)
 ogmios config show                               # print the file
 ogmios config edit                               # open it in $EDITOR
 ```
@@ -91,7 +92,7 @@ These edit `~/.config/ogmios/config.toml` in place, keeping its comments. By han
 ```toml
 # model = "e5-small-int8"   # or "e5-small" (fp32, 470 MB, same results, slower)
 #                           # or "e5-base-int8" (280 MB, ~40% slower, ~600 MB peak)
-# llm = "gemma-4-e2b"
+# llm = "gemma-4-e2b"       # or any GGUF file on Hugging Face (see below)
 
 [[sources]]
 path = "~/work/done.md"
@@ -104,6 +105,24 @@ path = "~/notes"
 glob = "**/*.md"
 exclude = ["archive/**"]
 ```
+
+### Another LLM
+
+The LLM can be any GGUF file on a public Hugging Face repository, without changing the
+code: the model's chat template comes with the file. Give it as `REPO/FILE.gguf`, or as
+the file's URL, copied from the browser:
+
+```sh
+ogmios install --llm google/gemma-4-E4B-it-qat-q4_0-gguf/gemma-4-E4B_q4_0-it.gguf
+ogmios install --llm https://huggingface.co/google/gemma-4-E4B-it-qat-q4_0-gguf/blob/main/gemma-4-E4B_q4_0-it.gguf
+ogmios install --llm gemma-4-e2b         # back to the built-in one
+```
+
+`install` downloads the commit the repository is at, and writes it into the config
+(`REPO/FILE.gguf@REVISION`): the model then stays the same until you change it. A new
+architecture may need a newer llama.cpp (`uv tool upgrade ogmios --reinstall`). The
+prompts were tuned on Gemma 4 E2B: check another model's answers, and the language they
+come in, on a few questions you know the answer to.
 
 Check how a file is split before trusting the results:
 

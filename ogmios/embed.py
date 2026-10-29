@@ -1,6 +1,7 @@
 """Sentence embeddings with ONNX Runtime.
 
-The model and its tokenizer are installed by `ogmios setup` (see `hub`). Loading them is most of a search's run time, the tokenizer above all: its 250k-word
+The model and its tokenizer are installed by `ogmios install` (see `hub`). Loading them
+is most of a search's run time, the tokenizer above all: its 250k-word
 vocabulary covers ~100 languages. It is pruned once to the Latin script (see
 `prune_tokenizer`), which more than halves its load time and memory.
 """
@@ -73,7 +74,7 @@ class Embedder:
 
     @property
     def files(self) -> list[str]:
-        """What `ogmios setup` downloads into `dir`."""
+        """What `ogmios install` downloads into `dir`."""
         return ["tokenizer.json", self.spec.model_file]
 
     @property

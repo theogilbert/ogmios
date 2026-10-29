@@ -45,3 +45,12 @@ def test_invalid_edits_are_not_written(tmp_path):
     with pytest.raises(ValueError, match="unknown llm"):
         config.set_value(path, "llm", "gpt")
     assert not path.exists()
+
+
+def test_any_gguf_file_as_llm(tmp_path):
+    path = tmp_path / "config.toml"
+    config.set_value(path, "llm", "org/repo/model.gguf")
+    assert config.load(path).llm == "org/repo/model.gguf"
+    path.write_text("[llm]\nrepo = 'org/repo'\n")
+    with pytest.raises(ValueError, match="llm must be a string"):
+        config.load(path)

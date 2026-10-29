@@ -5,6 +5,7 @@ import re
 import shlex
 import subprocess
 import sys
+from dataclasses import replace
 from datetime import date
 from pathlib import Path
 
@@ -48,13 +49,20 @@ def parse_cli_args() -> argparse.Namespace:
     parser.add_argument("--model", choices=sorted(MODELS), help="embedding model")
     commands = parser.add_subparsers(required=True)
 
-    setup = commands.add_parser(
-        "setup",
+    install = commands.add_parser(
+        "install",
         help="download the models and configure ogmios to use them",
         description="Download the embedding model (--model, else the configured one)"
-        " and the LLM, then write both to the config file.",
+        " and the LLM (--llm, else the configured one), then write both to the config"
+        " file, the LLM pinned to the revision downloaded.",
     )
-    setup.set_defaults(func=cmd_setup)
+    install.add_argument(
+        "--llm",
+        metavar="LLM",
+        help=f"the LLM to use: {', '.join(ask.LLMS)}, or a GGUF file on Hugging Face,"
+        " as REPO/FILE.gguf or its URL",
+    )
+    install.set_defaults(func=cmd_install)
 
     index = commands.add_parser("index", help="(re)build the index")
     index.add_argument(
@@ -134,6 +142,15 @@ def parse_cli_args() -> argparse.Namespace:
     model = cfg_commands.add_parser("model", help="show or set the embedding model")
     model.add_argument("name", nargs="?", choices=sorted(MODELS))
     model.set_defaults(func=cmd_config_model)
+    llm = cfg_commands.add_parser(
+        "llm",
+        help="show or set the LLM",
+        description="Set the LLM: a built-in one, or any GGUF file on Hugging Face, as"
+        " REPO/FILE.gguf[@REVISION] or its URL. `ogmios install` then downloads it and,"
+        " without a revision, pins the one it is at.",
+    )
+    llm.add_argument("name", nargs="?", metavar="LLM")
+    llm.set_defaults(func=cmd_config_llm)
     show = cfg_commands.add_parser("show", help="print the config file")
     show.set_defaults(func=cmd_config_show)
     edit = cfg_commands.add_parser("edit", help="open the config file in $EDITOR")
@@ -142,7 +159,7 @@ def parse_cli_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _setup(args: argparse.Namespace) -> tuple[config.Config, Embedder]:
+def _load(args: argparse.Namespace) -> tuple[config.Config, Embedder]:
     cfg = config.load(args.config)
     if args.source:
         cfg.sources = [config.Source(path=p.expanduser()) for p in args.source]
@@ -154,7 +171,7 @@ def _setup(args: argparse.Namespace) -> tuple[config.Config, Embedder]:
     # Before the index is touched, rather than halfway through re-embedding it.
     if not embedder.downloaded:
         raise ValueError(
-            f"embedding model {embedder.name} is not installed, run `ogmios setup`"
+            f"embedding model {embedder.name} is not installed, run `ogmios install`"
         )
     return cfg, embedder
 
@@ -179,11 +196,17 @@ def _refresh(
     return db
 
 
-def cmd_setup(args: argparse.Namespace) -> None:
+def cmd_install(args: argparse.Namespace) -> None:
     cfg = config.load(args.config)
     models = config.cache_dir() / "models"
     embedder = Embedder(args.model or cfg.model, models)
-    spec, llm = embedder.spec, ask.LLMS[cfg.llm]
+    llm_value = ask.llm_value(args.llm) if args.llm else cfg.llm
+    llm = ask.llm_spec(llm_value)
+    if llm.revision is None:
+        llm = replace(llm, revision=hub.latest_revision(llm.repo))
+        llm_value = llm.value()
+    assert llm.revision is not None
+    spec = embedder.spec
     wanted = [
         (
             f"embedding model {embedder.name}",
@@ -193,7 +216,7 @@ def cmd_setup(args: argparse.Namespace) -> None:
             embedder.files,
         ),
         (
-            f"LLM {cfg.llm}",
+            f"LLM {llm_value if llm_value in ask.LLMS else llm.model_file}",
             llm.repo,
             llm.revision,
             hub.model_dir(models, llm.repo, llm.revision),
@@ -209,6 +232,11 @@ def cmd_setup(args: argparse.Namespace) -> None:
             print("  installed")
             continue
         sizes = [hub.remote_size(repo, revision, f) for f in missing]
+        if None in sizes and not any(
+            (directory / (f + ".part")).exists() for f in missing
+        ):
+            # Most likely a misspelt file name; let the download say for sure.
+            print(f"  could not get the size of {', '.join(missing)}")
         size = (
             "size unknown" if None in sizes else hub.human(sum(s or 0 for s in sizes))
         )
@@ -220,23 +248,23 @@ def cmd_setup(args: argparse.Namespace) -> None:
             hub.download(repo, revision, f, directory)
 
     config.set_value(args.config, "model", embedder.name)
-    config.set_value(args.config, "llm", cfg.llm)
+    config.set_value(args.config, "llm", llm_value)
     print(
-        f'\nset model = "{embedder.name}", llm = "{cfg.llm}"'
+        f'\nset model = "{embedder.name}", llm = "{llm_value}"'
         f" in {config.tilde(args.config)}"
     )
 
 
 def cmd_index(args: argparse.Namespace) -> None:
-    cfg, embedder = _setup(args)
+    cfg, embedder = _load(args)
     _refresh(args, cfg, embedder, force=args.force)
 
 
 def cmd_ask(args: argparse.Namespace) -> None:
-    cfg, embedder = _setup(args)
-    model = ask.model_path(cfg.llm, config.cache_dir() / "models")
-    if not (args.prompt and args.literal):
-        hub.installed(model, f"LLM {cfg.llm}")
+    cfg, embedder = _load(args)
+    model = ask.model_path(ask.llm_spec(cfg.llm), config.cache_dir() / "models")
+    if not (args.prompt and args.literal):  # the only case that does not run it
+        model = hub.installed(model, f"LLM {cfg.llm}")
     question = " ".join(args.question)
     # Not over --json or a pipe: whatever reads stderr there wants lines, not frames.
     interactive = sys.stderr.isatty() and not (args.json or args.prompt)
@@ -248,7 +276,7 @@ def _ask(
     args: argparse.Namespace,
     cfg: config.Config,
     embedder: Embedder,
-    model: Path,
+    model: Path | None,  # None only with --prompt --literal, which do not run it
     question: str,
     spinner: Spinner,
 ) -> None:
@@ -260,7 +288,7 @@ def _ask(
     else:
         if not args.literal:
             spinner.status("loading the model")
-            llm = ask.load(model)
+            llm = ask.load(model)  # ty: ignore[invalid-argument-type]
             spinner.status("thinking of other wordings")
             wordings = ask.other_wordings(llm, topic)
         spinner.status("searching the notes")
@@ -290,7 +318,7 @@ def _ask(
         print(f"ogmios: {reading}", file=sys.stderr)
     if llm is None:
         spinner.status("loading the model")
-        llm = ask.load(model)
+        llm = ask.load(model)  # ty: ignore[invalid-argument-type]
     spinner.status(reading)
     if args.json:
         text = "".join(ask.answer(llm, chat)).strip()
@@ -361,11 +389,11 @@ def cmd_status(args: argparse.Namespace) -> None:
     if embedder.downloaded:
         print(f"  {config.tilde(embedder.dir)}  ({_size(embedder.dir)})")
     else:
-        print("  not installed, run `ogmios setup`")
-    llm = ask.model_path(cfg.llm, config.cache_dir() / "models")
-    print(f"\nllm  {cfg.llm}  ({ask.LLMS[cfg.llm].repo})")
-    if not llm.exists():
-        print("  not installed, run `ogmios setup`")
+        print("  not installed, run `ogmios install`")
+    llm = ask.model_path(ask.llm_spec(cfg.llm), config.cache_dir() / "models")
+    print(f"\nllm  {cfg.llm}")
+    if llm is None or not llm.exists():
+        print("  not installed, run `ogmios install`")
     else:
         print(f"  {config.tilde(llm)}  ({_size(llm)})")
 
@@ -447,7 +475,20 @@ def cmd_config_model(args: argparse.Namespace) -> None:
     if Embedder(args.name, config.cache_dir() / "models").downloaded:
         print(f"model set to {args.name}, notes are re-embedded on the next search")
     else:
-        print(f"model set to {args.name}, install it with `ogmios setup`")
+        print(f"model set to {args.name}, run `ogmios install`")
+
+
+def cmd_config_llm(args: argparse.Namespace) -> None:
+    if args.name is None:
+        print(config.load(args.config).llm)
+        return
+    value = ask.llm_value(args.name)
+    config.set_value(args.config, "llm", value)
+    path = ask.model_path(ask.llm_spec(value), config.cache_dir() / "models")
+    if path is not None and path.exists():
+        print(f"llm set to {value}")
+    else:
+        print(f"llm set to {value}, run `ogmios install`")
 
 
 def cmd_config_show(args: argparse.Namespace) -> None:
@@ -472,7 +513,7 @@ def cmd_config_edit(args: argparse.Namespace) -> None:
 _TEMPLATE = """\
 # model = "e5-small-int8"   # or "e5-small" (fp32, slower, same results)
 #                           # or "e5-base-int8" (larger, slower, see the README)
-# llm = "gemma-4-e2b"       # for `ogmios ask`
+# llm = "gemma-4-e2b"       # or any GGUF file on Hugging Face: "REPO/FILE.gguf"
 
 # [[sources]]
 # path = "~/work/done.md"

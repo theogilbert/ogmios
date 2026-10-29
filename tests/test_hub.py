@@ -1,5 +1,6 @@
 """Downloads against a local server that honours Range requests, like Hugging Face's."""
 
+import json
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -10,8 +11,19 @@ from ogmios import hub
 CONTENT = bytes(range(256)) * 100
 
 
+SHA = "0123456789abcdef0123456789abcdef01234567"
+
+
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
+        if self.path.startswith("/api/models/"):
+            found = self.path == "/api/models/org/repo/revision/main"
+            body = json.dumps({"sha": SHA}).encode()
+            self.send_response(200 if found else 404)
+            self.end_headers()
+            if found:
+                self.wfile.write(body)
+            return
         start = int(self.headers.get("Range", "bytes=0-")[6:].rstrip("-") or 0)
         if start >= len(CONTENT):
             self.send_response(416)
@@ -37,8 +49,7 @@ def server(monkeypatch):
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     httpd.starts = []  # ty: ignore[unresolved-attribute]
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
-    base = f"http://127.0.0.1:{httpd.server_port}"
-    monkeypatch.setattr(hub, "url", lambda repo, rev, name: f"{base}/{name}")
+    monkeypatch.setattr(hub, "HUB", f"http://127.0.0.1:{httpd.server_port}")
     yield httpd
     httpd.shutdown()
 
@@ -62,6 +73,14 @@ def test_remote_size(server):
     assert hub.remote_size("org/repo", "rev", "model.bin") == len(CONTENT)
 
 
-def test_missing_model_points_at_setup(tmp_path):
-    with pytest.raises(ValueError, match="LLM x is not installed, run `ogmios setup`"):
+def test_latest_revision(server):
+    assert hub.latest_revision("org/repo") == SHA
+    with pytest.raises(ValueError, match="no public repository org/missing"):
+        hub.latest_revision("org/missing")
+
+
+def test_missing_model_points_at_install(tmp_path):
+    with pytest.raises(
+        ValueError, match="LLM x is not installed, run `ogmios install`"
+    ):
         hub.installed(tmp_path / "model.gguf", "LLM x")

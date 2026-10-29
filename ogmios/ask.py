@@ -2,7 +2,7 @@
 search finds, rather than from whole files: a 2B model reads a few thousand tokens in
 seconds on a CPU, and makes fewer mistakes in a short context than in a long one.
 
-The model, installed by `ogmios setup`, runs in-process with llama.cpp. Its file is
+The model, installed by `ogmios install`, runs in-process with llama.cpp. Its file is
 memory-mapped, so loading it takes about a second and nothing needs to stay running
 between questions.
 """
@@ -27,8 +27,13 @@ if TYPE_CHECKING:
 @dataclass(frozen=True)
 class LLMSpec:
     repo: str
-    revision: str
+    revision: str | None  # None until `ogmios install` pins one
     model_file: str
+
+    def value(self) -> str:
+        """How the config names it, when it is not a built-in one."""
+        pin = f"@{self.revision}" if self.revision else ""
+        return f"{self.repo}/{self.model_file}{pin}"
 
 
 LLMS = {
@@ -40,6 +45,14 @@ LLMS = {
     ),
 }
 DEFAULT_LLM = "gemma-4-e2b"
+# Any GGUF file on Hugging Face: "REPO/FILE.gguf", "@REVISION" once pinned.
+_GGUF_RE = re.compile(
+    r"(?P<repo>[\w.-]+/[\w.-]+)/(?P<file>[^@\s]+\.gguf)(?:@(?P<rev>[0-9a-f]{40}))?"
+)
+_URL_RE = re.compile(
+    r"https://huggingface\.co/(?P<repo>[\w.-]+/[\w.-]+)/(?:blob|resolve)/"
+    r"(?P<rev>[^/]+)/(?P<file>[^?#]+\.gguf)"
+)
 CONTEXT_TOKENS = 4096
 # About 2.5k tokens of notes (French takes ~2.5 characters a token), read at ~170 tokens/s
 # on a laptop CPU: most of the time to the answer.
@@ -57,6 +70,9 @@ WORDINGS = (
     " if it has one. One line of comma-separated terms, nothing else."
 )
 WORDINGS_TOKENS = 40  # most of the time it costs: ~15 tokens/s
+# Far more than a brief answer needs: a model that loops (a small one may repeat a
+# sentence until its context is full) stops after ~40 s instead of minutes.
+ANSWER_TOKENS = 600
 
 SYSTEM = """\
 You answer questions about the user's own notes, using only the excerpts given.
@@ -343,9 +359,33 @@ def result(
     }
 
 
-def model_path(name: str, cache_dir: Path) -> Path:
-    """Where `ogmios setup` installs the LLM."""
-    spec = LLMS[name]
+def llm_spec(value: str) -> LLMSpec:
+    """The LLM a config value names: a built-in one, or REPO/FILE.gguf[@REVISION]."""
+    if value in LLMS:
+        return LLMS[value]
+    if m := _GGUF_RE.fullmatch(value):
+        return LLMSpec(m["repo"], m["rev"], m["file"])
+    raise ValueError(
+        f"unknown llm {value!r}: expected {', '.join(LLMS)},"
+        " or a GGUF file on Hugging Face as REPO/FILE.gguf"
+    )
+
+
+def llm_value(text: str) -> str:
+    """A config value from what the user gave: a value already, or the URL of a GGUF
+    file on Hugging Face, as a browser shows it."""
+    if m := _URL_RE.fullmatch(text.strip()):
+        # A branch ("main") is no revision: `ogmios install` pins the commit it is at.
+        pin = f"@{m['rev']}" if re.fullmatch(r"[0-9a-f]{40}", m["rev"]) else ""
+        text = f"{m['repo']}/{m['file']}{pin}"
+    llm_spec(text)  # say now if it is not one
+    return text
+
+
+def model_path(spec: LLMSpec, cache_dir: Path) -> Path | None:
+    """Where `ogmios install` installs the LLM; None before it pins a revision."""
+    if spec.revision is None:
+        return None
     return hub.model_dir(cache_dir, spec.repo, spec.revision) / spec.model_file
 
 
@@ -392,9 +432,13 @@ def answer(llm: "llama_cpp.Llama", chat: list[dict]) -> Iterator[str]:
     stream = llm.create_chat_completion(
         chat,  # ty: ignore[invalid-argument-type]
         temperature=0,  # the same question, the same answer
+        max_tokens=ANSWER_TOKENS,
         stream=True,
     )
     for chunk in stream:
         # Typed as a union with the non-streaming result.
-        if text := chunk["choices"][0]["delta"].get("content"):  # ty: ignore
+        choice = chunk["choices"][0]  # ty: ignore
+        if text := choice["delta"].get("content"):
             yield text
+        if choice.get("finish_reason") == "length":
+            yield " …"  # cut, not finished

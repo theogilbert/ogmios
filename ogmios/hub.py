@@ -1,10 +1,11 @@
 """Model files from Hugging Face, at pinned revisions so that cached vectors always match
 the model.
 
-Only `ogmios setup` downloads them. Every other command reads what it installed, and
+Only `ogmios install` downloads them. Every other command reads what it installed, and
 fails, pointing at it, when a file is missing.
 """
 
+import json
 import sys
 import time
 import urllib.error
@@ -12,20 +13,37 @@ import urllib.request
 from pathlib import Path
 
 DOWNLOAD_ATTEMPTS = 5
+HUB = "https://huggingface.co"
 
 
 def model_dir(cache_dir: Path, repo: str, revision: str) -> Path:
     return cache_dir / repo.replace("/", "--") / revision
 
 
-def installed(path: Path, what: str) -> Path:
-    if not path.exists():
-        raise ValueError(f"{what} is not installed, run `ogmios setup`")
+def installed(path: Path | None, what: str) -> Path:
+    """`path`, if the file is there; None is a model not pinned to a revision yet."""
+    if path is None or not path.exists():
+        raise ValueError(f"{what} is not installed, run `ogmios install`")
     return path
 
 
 def url(repo: str, revision: str, filename: str) -> str:
-    return f"https://huggingface.co/{repo}/resolve/{revision}/{filename}"
+    return f"{HUB}/{repo}/resolve/{revision}/{filename}"
+
+
+def latest_revision(repo: str) -> str:
+    """The commit a repository's main branch is at, to pin a model to."""
+    try:
+        api = f"{HUB}/api/models/{repo}/revision/main"
+        with urllib.request.urlopen(api, timeout=30) as response:
+            return json.load(response)["sha"]
+    except urllib.error.HTTPError as e:
+        if e.code in (401, 403, 404):
+            raise ValueError(
+                f"no public repository {repo} on Hugging Face"
+                " (gated and private ones are not supported)"
+            ) from None
+        raise
 
 
 def remote_size(repo: str, revision: str, filename: str) -> int | None:

@@ -149,22 +149,81 @@ A date in the answer that is neither the day of an excerpt nor written in one ge
 warning on stderr: a small model sometimes writes a wrong date while citing the right
 excerpt.
 
-`--json` prints, once the answer is written, `{"question", "wordings",
-"answer", "warnings", "excerpts"}`, where `wordings` is what was searched besides the
-question, and
+`--json` prints, once the answer is written, `{"question", "wordings", "answer",
+"warnings", "excerpts"}`, where `wordings` is what was searched besides the question, and
 each excerpt the model read is `{"n", "date", "title", "path", "line", "cited"}`: `n` is
 the number the answer cites it by, `date` is null for a section without one, and `line`
 is 1-based. Progress goes to stderr; on failure, stdout is empty, the message is on
 stderr and the exit status is non-zero.
 
-A 2B model reading excerpts can still misread them, or miss one of two answers: check
-the cited lines, printed after the answer as `[n] day | path:line`.
+The days the answer cites are printed after it, as `[n] day | path:line`.
 
 `ogmios status` shows where the config, index and models are stored, what each source
 matches, and whether the index is up to date.
 
 `-s/--source PATH` reads a file or directory instead of the configured sources.
 `OGMIOS_CONFIG` and `OGMIOS_DB` override the config and index locations.
+
+## Getting good answers
+
+The model only ever reads what the search hands it: about 2.5k tokens of excerpts, out of
+notes that may hold far more. Most bad answers come from the search missing the right
+day, not from the model; the rest from the model misreading what it was given.
+
+### In general
+
+- **Ask about your notes,** not about the world: the model is told to answer only from
+  the excerpts, and says so when they do not hold the answer.
+- **Use the words your notes use** when you know them: ticket ids, hostnames, project and
+  tool names. The keyword search matches them exactly, which is more reliable than
+  meaning alone. When you do not know them, describe the thing plainly: other wordings,
+  in English and French, are searched too (unless `--literal`).
+- **Say when, if you know.** A time expression ("in 2022", "depuis septembre", "la
+  semaine du 14 mars", "Q1 2024", "last summer") narrows the search to that period before
+  anything is read, so that other years do not compete. It is shown on stderr: check it
+  is the period you meant.
+- **One question at a time.** For something that happened several times, ask for all of
+  them: "list every time I…" rather than "when did I…".
+- **Summaries of a period** ("what did I do last week?") read the period's days whole,
+  most recent first, until the budget is spent: a week reads in full, a year does not.
+  Ask about a topic over a long period instead ("what did I do on the k8s migration in
+  2024?").
+- **Check the sources.** Each claim should end with the number of an excerpt; the cited
+  days are listed under the answer. An answer with nothing cited rests on nothing. A
+  date flagged on stderr is not in the notes read: the day in the source line is the
+  right one.
+- **When an answer looks wrong, run it again with `--prompt`.** If the day that answers
+  is not among the excerpts, the search missed it: rephrase with the words of the note,
+  add a time frame, or name the ticket or project. If it is there, the model misread it:
+  ask more narrowly, or try a larger model (see [Another LLM](#another-llm)).
+- **`--literal`** saves ~2 s when you know the exact words; leave it out when unsure of
+  the wording, which is when other wordings matter.
+- **Notes that are easy to search:** dated headers that `ogmios inspect` splits right,
+  one item per topic, and the names of things (tickets, hosts, projects) written out.
+
+### With Gemma 4 E2B, the default LLM
+
+What it does well and less well, seen while building ogmios:
+
+- **It answers in the language of the question,** English or French, whatever the
+  language of the notes. Ask in the language you want the answer in; other languages are
+  not supported.
+- **It tends to give one answer where there are several,** even when the excerpts hold
+  both and it is told to mention them all: "when were the SFTP flows validated?" got the
+  2024 validation, not the 2022 one sitting next to it. Ask "list every time…", and look
+  at the other excerpts with `--prompt` when it matters.
+- **It can misquote a date** while citing the right excerpt (2024-03-15 for a note of the
+  14th). Such dates are flagged on stderr; the source line's day is the right one.
+- **Do not ask it to compute with dates** ("how many weeks between…", "which weekday
+  was…"): small models are poor at it. Read the days off the sources instead.
+- **It does not always know the jargon for a description:** "tâche d'interrogation
+  périodique" was not linked to a "polling job". Use the technical term when you know it.
+- **It picks one reading of an ambiguous question:** "when did I move to Airflow?" got
+  the move to Airflow on k8s, not the first use of Airflow. Say which one you mean.
+- **It is honest about absence:** asked about something the notes never mention, it says
+  so rather than inventing an answer.
+- **Speed:** ~2 s for other wordings, then ~170 tokens/s reading the notes and ~15
+  tokens/s writing: 10 to 15 s for most questions on a laptop CPU.
 
 ## Development
 

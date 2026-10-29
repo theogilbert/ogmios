@@ -13,10 +13,14 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from . import hub
 from .search import Hit
 from .when import Period
+
+if TYPE_CHECKING:
+    import llama_cpp
 
 
 @dataclass(frozen=True)
@@ -206,8 +210,7 @@ def model_path(name: str, cache_dir: Path) -> Path:
 _quiet = None  # see `answer`
 
 
-def answer(model: Path, chat: list[dict]) -> Iterator[str]:
-    """The answer, piece by piece as it is written."""
+def load(model: Path) -> "llama_cpp.Llama":
     # Imported here: loading llama.cpp would slow down every other command.
     import ctypes
 
@@ -218,12 +221,17 @@ def answer(model: Path, chat: list[dict]) -> Iterator[str]:
     global _quiet
     _quiet = llama_cpp.llama_log_callback(lambda level, text, user_data: None)
     llama_cpp.llama_log_set(_quiet, ctypes.c_void_p(0))
-    llm = llama_cpp.Llama(
+    return llama_cpp.Llama(
         str(model),
         n_ctx=CONTEXT_TOKENS,
         swa_full=False,  # the sliding-window layers keep only their window
         verbose=False,
     )
+
+
+def answer(llm: "llama_cpp.Llama", chat: list[dict]) -> Iterator[str]:
+    """The answer, piece by piece as it is written; nothing comes until the model has
+    read the notes, most of the wait."""
     stream = llm.create_chat_completion(
         chat,  # ty: ignore[invalid-argument-type]
         temperature=0.2,

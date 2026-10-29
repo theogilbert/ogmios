@@ -108,6 +108,9 @@ ogmios ask --prompt "..."            # what the model would be given, without ru
 ogmios ask --json "..."              # one JSON object, for editor plugins
 ```
 
+On a terminal, a status line with a spinner shows what is going on (indexing, searching,
+loading the model, reading the notes) until the answer starts to appear.
+
 `--json` prints, once the answer is written, `{"question", "answer", "excerpts"}`, where
 each excerpt the model read is `{"n", "date", "title", "path", "line", "cited"}`: `n` is
 the number the answer cites it by, `date` is null for a section without one, and `line`

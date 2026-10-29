@@ -12,6 +12,7 @@ from . import ask, config, hub, store
 from .embed import MODELS, Embedder
 from .parse import SplitOptions, chunk_section, parse_file
 from .search import is_about_anything, search
+from .spinner import Spinner
 from .when import find_period
 
 
@@ -153,15 +154,17 @@ def _refresh(
     cfg: config.Config,
     embedder: Embedder,
     force: bool = False,
+    spinner: Spinner | None = None,
 ):
     db = store.connect(args.db)
     files = store.collect_files(cfg.sources)
     if force or store.is_stale(db, files, embedder.name):
+        if spinner:
+            spinner.status("indexing the notes")
         stats = store.rebuild(db, files, embedder)
-        print(
+        (spinner or Spinner(enabled=False)).print(
             f"indexed {stats.files} files: {stats.sections} sections, {stats.chunks} chunks"
-            f" ({stats.embedded} newly embedded)",
-            file=sys.stderr,
+            f" ({stats.embedded} newly embedded)"
         )
     return db
 
@@ -225,7 +228,22 @@ def cmd_ask(args: argparse.Namespace) -> None:
     if not args.prompt:
         hub.installed(model, f"LLM {cfg.llm}")
     question = " ".join(args.question)
-    db = _refresh(args, cfg, embedder)
+    # Not over --json or a pipe: whatever reads stderr there wants lines, not frames.
+    interactive = sys.stderr.isatty() and not (args.json or args.prompt)
+    with Spinner(enabled=interactive) as spinner:
+        _ask(args, cfg, embedder, model, question, spinner)
+
+
+def _ask(
+    args: argparse.Namespace,
+    cfg: config.Config,
+    embedder: Embedder,
+    model: Path,
+    question: str,
+    spinner: Spinner,
+) -> None:
+    db = _refresh(args, cfg, embedder, spinner=spinner)
+    spinner.status("searching the notes")
     period = None
     if found := find_period(question, date.today()):
         period, topic = found
@@ -248,13 +266,20 @@ def cmd_ask(args: argparse.Namespace) -> None:
 
     dates = sorted(e.date for e in excerpts if e.date)
     span = f", {dates[0]} to {dates[-1]}" if dates else ""
-    print(f"ogmios: reading {_plural(len(excerpts), 'excerpt')}{span}", file=sys.stderr)
+    reading = f"reading {_plural(len(excerpts), 'excerpt')}{span}"
+    if not spinner.enabled:
+        print(f"ogmios: {reading}", file=sys.stderr)
+    spinner.status("loading the model")
+    llm = ask.load(model)
+    spinner.status(reading)
     if args.json:
-        text = "".join(ask.answer(model, chat)).strip()
+        text = "".join(ask.answer(llm, chat)).strip()
         print(json.dumps(ask.result(question, text, excerpts), ensure_ascii=False))
         return
     written = []
-    for piece in ask.answer(model, chat):
+    for piece in ask.answer(llm, chat):
+        if not written:
+            spinner.stop()
         written.append(piece)
         print(piece, end="", flush=True)
     print()

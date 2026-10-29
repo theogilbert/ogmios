@@ -2,13 +2,15 @@
 step, while `ask` searches, loads the model and waits for it to read the notes.
 
 It is drawn from a thread: llama.cpp and ONNX Runtime release the GIL while they compute,
-so it keeps turning during the slow steps.
+so it keeps turning during the slow steps. It writes to its own copy of the stderr file
+descriptor: llama-cpp-python points descriptor 2 at /dev/null while it loads a model.
 """
 
+import os
 import sys
 import threading
 import time
-from typing import Self
+from typing import Self, TextIO
 
 FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 CLEAR = "\r\033[K"
@@ -22,9 +24,11 @@ class Spinner:
         self._lock = threading.Lock()
         self._done = threading.Event()
         self._thread: threading.Thread | None = None
+        self._out: TextIO = sys.stderr
 
     def __enter__(self) -> Self:
         if self.enabled:
+            self._out = open(os.dup(sys.stderr.fileno()), "w", encoding="utf-8")
             self._thread = threading.Thread(target=self._run, daemon=True)
             self._thread.start()
         return self
@@ -40,9 +44,7 @@ class Spinner:
     def print(self, message: str) -> None:
         """A line of its own above the status, which is redrawn on the next frame."""
         with self._lock:
-            print(
-                (CLEAR if self.enabled else "") + message, file=sys.stderr, flush=True
-            )
+            print((CLEAR if self.enabled else "") + message, file=self._out, flush=True)
 
     def stop(self) -> None:
         """Clear the status line, for the answer to take its place."""
@@ -51,8 +53,9 @@ class Spinner:
         self._done.set()
         self._thread.join()
         self._thread = None
-        sys.stderr.write(CLEAR)
-        sys.stderr.flush()
+        self._out.write(CLEAR)
+        self._out.close()
+        self._out = sys.stderr
 
     def _run(self) -> None:
         frame = 1
@@ -67,5 +70,5 @@ class Spinner:
             seconds = int(time.monotonic() - self._since)
             elapsed = f"  {seconds}s" if seconds else ""
             line = f"{FRAMES[frame % len(FRAMES)]} {self._text}{elapsed}"
-            sys.stderr.write(CLEAR + line)
-            sys.stderr.flush()
+            self._out.write(CLEAR + line)
+            self._out.flush()

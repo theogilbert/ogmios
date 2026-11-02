@@ -139,6 +139,8 @@ ogmios ask "..."
 ogmios ask --prompt "..."            # what the model would be given, without the answer
 ogmios ask --literal "..."           # the question's own words only, ~2 s faster
 ogmios ask --json "..."              # one JSON object, for editor plugins
+ogmios bad --day 2024-03-14 "..."    # the last answer was wrong; that day holds the right one
+ogmios report                        # statistics of the questions asked, nothing of the notes
 ```
 
 On a terminal, a status line with a spinner shows what is going on (indexing, loading the
@@ -163,6 +165,30 @@ matches, and whether the index is up to date.
 
 `-s/--source PATH` reads a file or directory instead of the configured sources.
 `OGMIOS_CONFIG` and `OGMIOS_DB` override the config and index locations.
+
+### The log, and reporting back without the notes
+
+Every answer is logged on the machine, to `asks.jsonl` next to the index (`ogmios status`
+shows where): the question, the other wordings, the days found and their rank, the
+excerpts read, the answer, and how long each step took. It holds excerpts of the notes,
+so it is readable by its owner only, and it never leaves the machine. It is two files,
+the current one and the one before it, which together never exceed 100 MB.
+`OGMIOS_LOG=PATH` moves it, `OGMIOS_LOG=off` turns it off.
+
+`ogmios bad` marks the last answer as wrong, with a note in your own words if you like.
+Given the day that holds the right answer (`--day`), it says what went wrong:
+
+- **not found:** the search did not find that day;
+- **cut by the budget:** the search found it, but the excerpts had no room left for it;
+- **misread:** the model read it and got it wrong.
+
+`ogmios report` prints statistics of the log: counts, rates, medians and how bad answers
+went wrong, never a word of a question, a note, an answer or a path. It is short so that
+you can read it in full before sharing it where the notes may not go.
+`scripts/eval.py budget --private` does the same for experiments: it runs the answers
+marked bad with `--day` again under other budgets and prints only numbers (see
+[Development](#development)). For a failure numbers do not explain, write a made-up note
+of the same shape into `tests/fixtures/done.md` and a case into `scripts/eval.py`.
 
 ## Getting good answers
 
@@ -196,6 +222,7 @@ day, not from the model; the rest from the model misreading what it was given.
   is not among the excerpts, the search missed it: rephrase with the words of the note,
   add a time frame, or name the ticket or project. If it is there, the model misread it:
   ask more narrowly, or try a larger model (see [Another LLM](#another-llm)).
+  Then `ogmios bad --day DAY`, which says which of the two it was and keeps count.
 - **`--literal`** saves ~2 s when you know the exact words; leave it out when unsure of
   the wording, which is when other wordings matter.
 - **Notes that are easy to search:** dated headers that `ogmios inspect` splits right,
@@ -230,5 +257,25 @@ What it does well and less well, seen while building ogmios:
 ```sh
 uv sync --group dev
 make ci                                  # ruff, ty, pytest
-uv run python scripts/eval.py            # retrieval benchmark, per embedding model
+uv run python scripts/eval.py search     # rank of the expected day, per embedding model
+uv run python scripts/eval.py budget     # per excerpt budget: day found, read, or cut
+uv run python scripts/eval.py budget --llm               # ...and whether the answer cites it
+uv run python scripts/eval.py budget --private --llm     # on the answers marked bad
 ```
+
+`budget --private` runs, against the configured index, the answers marked bad with
+`ogmios bad --day`, with the other wordings logged for them, and prints only numbers,
+for example:
+
+```
+cases: 23, llm: gemma-4-e2b
+budget  found  read   cut  median_rank  chars  cites  flagged  read_s
+6000    21/23 15/23   6            3   5810  14/23     2      14.1
+12000   21/23 19/23   2            3  11420  15/23     3      27.5
+```
+
+`found` is the expected day in the search's days, `read` in the excerpts, `cut` found
+but left out by the budget, `cites` cited by the answer, `read_s` the median seconds the
+model takes to read the excerpts. The fixture is small (its days fit in ~3000
+characters), so budgets over that make no difference on it: a budget is best judged with
+`--private`.

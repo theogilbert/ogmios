@@ -55,7 +55,7 @@ _URL_RE = re.compile(
     r"https://huggingface\.co/(?P<repo>[\w.-]+/[\w.-]+)/(?:blob|resolve)/"
     r"(?P<rev>[^/]+)/(?P<file>[^?#]+\.gguf)"
 )
-CONTEXT_TOKENS = 4096
+CONTEXT_TOKENS: int = 4096  # scripts/eval.py raises it for larger budgets
 # About 2.5k tokens of notes (French takes ~2.5 characters a token), read at ~170 tokens/s
 # on a laptop CPU: most of the time to the answer.
 BUDGET_CHARS = 6_000

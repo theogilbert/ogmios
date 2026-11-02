@@ -17,11 +17,13 @@ from typing import TYPE_CHECKING
 
 from . import hub
 from .dates import find_dates
-from .search import Hit
+from .search import Hit, is_about_anything, merge, search
 from .when import Period
 
 if TYPE_CHECKING:
     import llama_cpp
+
+    from .embed import Embedder
 
 
 @dataclass(frozen=True)
@@ -90,6 +92,27 @@ class Excerpt:
     date: str | None
     title: str
     text: str
+    section: int | None = None  # its id in the index
+
+
+def gather(
+    db: sqlite3.Connection,
+    embedder: "Embedder | None",
+    topic: str,
+    period: Period | None,
+    days: int,
+    wordings: str = "",
+) -> tuple[list[Hit], list[Excerpt]]:
+    """The days found and what of them the model reads. Asked about a period with no
+    topic, the period's days are read whole: no search, no hits."""
+    if period and is_about_anything(topic):
+        return [], excerpts_in(db, period)[:days]
+    hits = search(db, embedder, topic, days, period=period)
+    if wordings:
+        # Merged rather than added to the question, which they would dilute.
+        widened = search(db, embedder, f"{topic} {wordings}", days, period=period)
+        hits = merge(hits, widened)[:days]
+    return hits, excerpts_for(db, hits)
 
 
 def excerpts_for(db: sqlite3.Connection, hits: list[Hit]) -> list[Excerpt]:
@@ -199,7 +222,7 @@ class _Day:
     def excerpt(self) -> Excerpt:
         hit = self.hit
         line = hit.line if hit.line - 1 in self.selected else min(self.selected) + 1
-        return Excerpt(hit.path, line, hit.date, hit.title, self.text())
+        return Excerpt(hit.path, line, hit.date, hit.title, self.text(), hit.section)
 
     def _capped(self, start: int, end: int, focus: int) -> set[int]:
         """The lines from `start` to `end`, cut around `focus` if too long."""
@@ -211,18 +234,18 @@ class _Day:
 def excerpts_in(db: sqlite3.Connection, period: Period) -> list[Excerpt]:
     """The days of the period, taken most recent first until the budget is spent."""
     rows = db.execute(
-        "SELECT path, start_line, end_line, title, date FROM sections"
+        "SELECT path, start_line, end_line, title, date, id FROM sections"
         " WHERE date BETWEEN ? AND ? ORDER BY date DESC, path, start_line",
         (period.start.isoformat(), period.end.isoformat()),
     ).fetchall()
-    return _excerpts([(*row, row[1]) for row in rows])
+    return _excerpts([(*row[:5], row[1], row[5]) for row in rows])
 
 
 def _excerpts(sections: list[tuple]) -> list[Excerpt]:
     file_lines: dict[str, list[str]] = {}
     result: list[Excerpt] = []
     left = BUDGET_CHARS
-    for path, start, end, title, day, focus in sections:
+    for path, start, end, title, day, focus, section in sections:
         if path not in file_lines:
             file_lines[path] = (
                 Path(path).read_text(encoding="utf-8", errors="replace").splitlines()
@@ -235,7 +258,7 @@ def _excerpts(sections: list[tuple]) -> list[Excerpt]:
             continue
         if len(text) > left:
             break
-        result.append(Excerpt(path, focus + 1, day, title, text))
+        result.append(Excerpt(path, focus + 1, day, title, text, section))
         left -= len(text)
     # In the order they were written: "when" is easier to answer from a timeline.
     return sorted(result, key=lambda e: (e.date or "", e.path, e.line))
@@ -443,6 +466,12 @@ def other_wordings(llm: "llama_cpp.Llama", question: str) -> str:
     )
     text = out["choices"][0]["message"]["content"] or ""  # ty: ignore
     return " ".join(text.split())
+
+
+def prompt_tokens(llm: "llama_cpp.Llama", chat: list[dict]) -> int:
+    """About the tokens the model read: the messages, without the chat template's."""
+    text = "\n".join(m["content"] for m in chat)
+    return len(llm.tokenize(text.encode(), add_bos=False))
 
 
 def answer(llm: "llama_cpp.Llama", chat: list[dict]) -> Iterator[str]:

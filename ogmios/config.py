@@ -74,6 +74,14 @@ def db_path() -> Path:
     return data_dir() / "index.sqlite"
 
 
+def log_path() -> Path | None:
+    """Where `ask` logs what it did; None when logging is off (`OGMIOS_LOG=off`)."""
+    value = os.environ.get("OGMIOS_LOG")
+    if value == "off":
+        return None
+    return Path(value) if value else data_dir() / "asks.jsonl"
+
+
 def data_dir() -> Path:
     return _xdg("XDG_DATA_HOME", ".local/share") / "ogmios"
 

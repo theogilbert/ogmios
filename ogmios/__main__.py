@@ -5,14 +5,15 @@ import re
 import shlex
 import subprocess
 import sys
+import time
 from dataclasses import replace
 from datetime import date
 from pathlib import Path
 
-from . import ask, config, hub, store
+from . import ask, config, hub, journal, store
 from .embed import MODELS, Embedder
 from .parse import SplitOptions, chunk_section, parse_file
-from .search import is_about_anything, merge, search
+from .search import is_about_anything
 from .spinner import Spinner
 from .when import find_period
 
@@ -99,6 +100,28 @@ def parse_cli_args() -> argparse.Namespace:
         help="print the answer and its sources as one JSON object, once written",
     )
     question.set_defaults(func=cmd_ask)
+
+    bad = commands.add_parser(
+        "bad",
+        help="mark the last answer as wrong, for `ogmios report`",
+        description="Mark the last answer as wrong, in the log. Given the day of the"
+        " notes that holds the right answer, says why it went wrong: the search did not"
+        " find that day, the budget left it out, or the model misread it.",
+    )
+    bad.add_argument(
+        "--day", type=date.fromisoformat, help="the day holding the right answer"
+    )
+    bad.add_argument("note", nargs="*", help="what was wrong, in your own words")
+    bad.set_defaults(func=cmd_bad)
+
+    report = commands.add_parser(
+        "report",
+        help="statistics of the questions logged, without a word of the notes",
+        description="Statistics of the questions logged: counts, rates and measures"
+        " only, never a word of a question, a note, an answer or a path. Read it before"
+        " you share it.",
+    )
+    report.set_defaults(func=cmd_report)
 
     inspect = commands.add_parser("inspect", help="show how a file is split")
     inspect.add_argument("file", type=Path)
@@ -280,30 +303,37 @@ def _ask(
     question: str,
     spinner: Spinner,
 ) -> None:
+    clock = time.monotonic()
+    seconds: dict[str, float] = {}
+
+    def lap(step: str) -> None:
+        nonlocal clock
+        now = time.monotonic()
+        seconds[step] = seconds.get(step, 0.0) + now - clock
+        clock = now
+
+    started = clock
     db = _refresh(args, cfg, embedder, spinner=spinner)
-    period, topic = find_period(question, date.today()) or (None, question)
+    lap("index")
+    today = date.today()
+    period, topic = find_period(question, today) or (None, question)
+    whole = period is not None and is_about_anything(topic)
     llm, wordings = None, ""
-    if period and is_about_anything(topic):
-        excerpts = ask.excerpts_in(db, period)[: args.days]
-    else:
-        if not args.literal:
-            spinner.status("loading the model")
-            llm = ask.load(model)  # ty: ignore[invalid-argument-type]
-            spinner.status("thinking of other wordings")
-            wordings = ask.other_wordings(llm, topic)
+    if not whole and not args.literal:
+        spinner.status("loading the model")
+        llm = ask.load(model)  # ty: ignore[invalid-argument-type]
+        lap("load")
+        spinner.status("thinking of other wordings")
+        wordings = ask.other_wordings(llm, topic)
+        lap("wordings")
+    if not whole:
         spinner.status("searching the notes")
-        hits = search(db, embedder, topic, args.days, period=period)
-        if wordings:
-            # Merged rather than added to the question, which they would dilute.
-            widened = search(
-                db, embedder, f"{topic} {wordings}", args.days, period=period
-            )
-            hits = merge(hits, widened)[: args.days]
-        excerpts = ask.excerpts_for(db, hits)
+    hits, excerpts = ask.gather(db, embedder, topic, period, args.days, wordings)
+    lap("search")
     if not excerpts:
         where = f" from {period} ({period.words})" if period else ""
         raise ValueError(f"no notes{where} to answer from")
-    chat = ask.messages(question, excerpts, date.today())
+    chat = ask.messages(question, excerpts, today)
     if args.prompt:
         if wordings:
             print(f"--- searched besides the question\n{wordings}")
@@ -319,30 +349,95 @@ def _ask(
     if llm is None:
         spinner.status("loading the model")
         llm = ask.load(model)  # ty: ignore[invalid-argument-type]
+        lap("load")
     spinner.status(reading)
-    if args.json:
-        text = "".join(ask.answer(llm, chat)).strip()
-        result = ask.result(question, text, excerpts, wordings)
-        print(json.dumps(result, ensure_ascii=False))
-        return
-    written = []
+    written: list[str] = []
     for piece in ask.answer(llm, chat):
         if not written:
+            lap("read")  # nothing comes until the model has read it all
             spinner.stop()
         written.append(piece)
-        print(piece, end="", flush=True)
+        if not args.json:
+            print(piece, end="", flush=True)
+    lap("write")
+    seconds["total"] = time.monotonic() - started
+    text = "".join(written)
+    _log(
+        question=question,
+        today=today,
+        period=period,
+        whole=whole,
+        wordings=wordings,
+        literal=args.literal,
+        days=args.days,
+        llm=cfg.llm,
+        model=embedder.name,
+        hits=hits,
+        excerpts=excerpts,
+        chat=chat,
+        answer=text.strip(),
+        prompt_tokens=ask.prompt_tokens(llm, chat),
+        answer_tokens=len(written),
+        seconds=seconds,
+    )
+    if args.json:
+        result = ask.result(question, text.strip(), excerpts, wordings)
+        print(json.dumps(result, ensure_ascii=False))
+        return
     print(flush=True)  # before the warnings, which go to stderr
-    for wrong in ask.unknown_dates("".join(written), excerpts):
+    for wrong in ask.unknown_dates(text, excerpts):
         print(
             f"ogmios: {wrong} is not a date of the notes read, check it",
             file=sys.stderr,
         )
-    sources = ask.cited("".join(written), excerpts)
+    sources = ask.cited(text, excerpts)
     if sources:
         print()
     for i, e in enumerate(excerpts, 1):
         if e in sources:
             print(f"[{i}] {e.date or e.title} | {e.path}:{e.line}")
+
+
+def _log(**fields) -> None:
+    """Logs the question, unless logging is off; a log that cannot be written does not
+    lose the answer."""
+    path = config.log_path()
+    if path is None:
+        return
+    try:
+        journal.append(path, journal.ask_record(**fields))
+    except (OSError, ValueError) as e:
+        print(f"ogmios: not logged: {e}", file=sys.stderr)
+
+
+def cmd_bad(args: argparse.Namespace) -> None:
+    path = _log_path()
+    last = journal.last_ask(path)
+    day = args.day.isoformat() if args.day else None
+    journal.append(path, journal.bad_record(last, day, " ".join(args.note)))
+    print(f"marked bad: {last['question']}  (asked {last['at'].replace('T', ' ')})")
+    cause, rank = journal.diagnose(last, day)
+    ranked = f", ranked {rank} of {len(last['hits'])} by the search" if rank else ""
+    explanations = {
+        "not found": "the search did not find that day: try the words of the note,"
+        " a time frame, or a ticket or project name",
+        "outside the period": "that day is outside the period the question named",
+        "cut by the budget": "the search found that day, but the budget left it out",
+        "misread": "the model read that day and got it wrong",
+    }
+    if cause != "unknown":
+        print(f"{explanations[cause]}{ranked}")
+
+
+def cmd_report(args: argparse.Namespace) -> None:
+    print(journal.report(journal.records(_log_path())))
+
+
+def _log_path() -> Path:
+    path = config.log_path()
+    if path is None:
+        raise ValueError("logging is off (OGMIOS_LOG=off)")
+    return path
 
 
 def cmd_inspect(args: argparse.Namespace) -> None:
@@ -384,6 +479,13 @@ def cmd_status(args: argparse.Namespace) -> None:
     db_note = f"  ({_size(args.db)})" if args.db.exists() else "  (not created yet)"
     print(f"  index   {config.tilde(args.db)}{db_note}{overridden('OGMIOS_DB')}")
     print(f"  models  {config.tilde(config.cache_dir() / 'models')}")
+    log = config.log_path()
+    if log is None:
+        print(f"  log     off{overridden('OGMIOS_LOG')}")
+    else:
+        files = [f for f in (journal.previous(log), log) if f.exists()]
+        size = hub.human(sum(f.stat().st_size for f in files)) if files else "empty"
+        print(f"  log     {config.tilde(log)}  ({size}){overridden('OGMIOS_LOG')}")
 
     print(f"\nmodel  {embedder.name}  ({embedder.spec.repo})")
     if embedder.downloaded:

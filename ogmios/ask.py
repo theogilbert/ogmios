@@ -403,12 +403,31 @@ def load(model: Path) -> "llama_cpp.Llama":
     global _quiet
     _quiet = llama_cpp.llama_log_callback(lambda level, text, user_data: None)
     llama_cpp.llama_log_set(_quiet, ctypes.c_void_p(0))
-    return llama_cpp.Llama(
+    llm = llama_cpp.Llama(
         str(model),
         n_ctx=CONTEXT_TOKENS,
         swa_full=False,  # the sliding-window layers keep only their window
         verbose=False,
     )
+    template = llm.metadata.get("tokenizer.chat_template", "")
+    if "enable_thinking" in template:
+        # Models like Qwen3.5 think before they answer unless told not to: hundreds of
+        # tokens, minutes on a CPU. Chat completion does not pass the switch on.
+        from llama_cpp import llama_chat_format as chat_format
+
+        def token(id: int) -> str:
+            return llm.detokenize([id], special=True).decode() if id != -1 else ""
+
+        formatter = chat_format.Jinja2ChatFormatter(
+            template,
+            eos_token=token(llm.token_eos()),
+            bos_token=token(llm.token_bos()),
+            stop_token_ids=[llm.token_eos()],
+        )
+        llm.chat_handler = chat_format.chat_formatter_to_chat_completion_handler(
+            lambda **kwargs: formatter(**kwargs, enable_thinking=False)
+        )
+    return llm
 
 
 def other_wordings(llm: "llama_cpp.Llama", question: str) -> str:

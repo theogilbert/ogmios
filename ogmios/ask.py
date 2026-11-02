@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING
 
 from . import hub
 from .dates import find_dates
-from .search import Hit, is_about_anything, merge, search
+from .search import Hit, is_about_anything, merge, search, section_filter
 from .when import Period
 
 if TYPE_CHECKING:
@@ -93,6 +93,7 @@ class Excerpt:
     title: str
     text: str
     section: int | None = None  # its id in the index
+    url: str | None = None  # where to read it on the web, for a fetched source
 
 
 def gather(
@@ -102,15 +103,19 @@ def gather(
     period: Period | None,
     days: int,
     wordings: str = "",
+    paths: list[str] | None = None,
 ) -> tuple[list[Hit], list[Excerpt]]:
-    """The days found and what of them the model reads. Asked about a period with no
-    topic, the period's days are read whole: no search, no hits."""
+    """The days found and what of them the model reads, of the files `paths` if given.
+    Asked about a period with no topic, the period's days are read whole: no search, no
+    hits."""
     if period and is_about_anything(topic):
-        return [], excerpts_in(db, period)[:days]
-    hits = search(db, embedder, topic, days, period=period)
+        return [], excerpts_in(db, period, paths)[:days]
+    hits = search(db, embedder, topic, days, period=period, paths=paths)
     if wordings:
         # Merged rather than added to the question, which they would dilute.
-        widened = search(db, embedder, f"{topic} {wordings}", days, period=period)
+        widened = search(
+            db, embedder, f"{topic} {wordings}", days, period=period, paths=paths
+        )
         hits = merge(hits, widened)[:days]
     return hits, excerpts_for(db, hits)
 
@@ -231,12 +236,15 @@ class _Day:
         return set(range(start + first, start + last))
 
 
-def excerpts_in(db: sqlite3.Connection, period: Period) -> list[Excerpt]:
+def excerpts_in(
+    db: sqlite3.Connection, period: Period, paths: list[str] | None = None
+) -> list[Excerpt]:
     """The days of the period, taken most recent first until the budget is spent."""
+    condition, params = section_filter(period, paths, table="sections")
     rows = db.execute(
         "SELECT path, start_line, end_line, title, date, id FROM sections"
-        " WHERE date BETWEEN ? AND ? ORDER BY date DESC, path, start_line",
-        (period.start.isoformat(), period.end.isoformat()),
+        f" WHERE {condition} ORDER BY date DESC, path, start_line",
+        params,
     ).fetchall()
     return _excerpts([(*row[:5], row[1], row[5]) for row in rows])
 
@@ -375,6 +383,7 @@ def result(
                 "title": e.title,
                 "path": e.path,
                 "line": e.line,
+                "url": e.url,  # null but for a fetched source, such as an issue
                 "cited": e in sources,
             }
             for i, e in enumerate(excerpts, 1)

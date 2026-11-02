@@ -92,6 +92,11 @@ def test_period_restricts_the_search(db):
     assert [(h.date, h.line) for h in hits] == [("2022-04-11", 24)]
 
 
+def test_paths_restrict_the_search(db):
+    assert search(db, None, "RESEAU-4512", paths=[str(FIXTURE.resolve())])
+    assert search(db, None, "RESEAU-4512", paths=[]) == []
+
+
 def test_queries_about_anything():
     assert is_about_anything("what did I do")
     assert is_about_anything("qu'ai-je fait ?")

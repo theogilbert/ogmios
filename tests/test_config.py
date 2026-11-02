@@ -6,22 +6,69 @@ from ogmios import config
 def test_add_and_remove_sources_keep_comments(tmp_path):
     path = tmp_path / "config.toml"
     path.write_text('# my notes\n\n[[sources]]\npath = "~/a.md"  # work\n')
-    config.add_source(path, {"path": str(tmp_path), "delimiters": [r"^## \d{4}"]})
+    config.add_source(
+        path, {"name": "dir", "path": str(tmp_path), "delimiters": [r"^## \d{4}"]}
+    )
     config.add_source(path, {"path": "~/b.md", "day_first": False})
     sources = config.load(path).sources
+    assert [s.name for s in sources] == ["a", "dir", "b"]
     assert [s.options.delimiters[0].pattern for s in sources[1:2]] == [r"^## \d{4}"]
     assert sources[2].options.day_first is False
     assert r"delimiters = ['^## \d{4}']" in path.read_text()
 
-    config.remove_source(path, tmp_path)
+    assert config.remove_source(path, "dir").path == tmp_path
     assert path.read_text() == (
         '# my notes\n\n[[sources]]\npath = "~/a.md"  # work\n\n'
         '[[sources]]\npath = "~/b.md"\nday_first = false\n'
     )
-    with pytest.raises(ValueError, match="not a configured source"):
-        config.remove_source(path, tmp_path)
-    with pytest.raises(ValueError, match="already a source"):
-        config.add_source(path, {"path": "~/b.md"})
+    with pytest.raises(ValueError, match="no source named 'dir' \\(sources: a, b\\)"):
+        config.remove_source(path, "dir")
+    with pytest.raises(ValueError, match="already source 'b'"):
+        config.add_source(path, {"name": "other", "path": "~/b.md"})
+    with pytest.raises(ValueError, match="already a source named 'b'"):
+        config.add_source(path, {"path": "~/elsewhere/b.md"})
+
+
+def test_gitlab_issues_source(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    path = tmp_path / "config.toml"
+    url = "https://gitlab.example.com:8443/group/sub/proj"
+    config.add_source(
+        path,
+        {
+            "type": "gitlab-issues",
+            "url": "https://gitlab.example.com:8443/group/sub/proj.git",
+        },
+    )
+    (source,) = config.load(path).sources
+    assert (source.name, source.type, source.url) == ("proj", "gitlab-issues", url)
+    assert source.fetched
+    assert source.path == (
+        tmp_path / "data/ogmios/gitlab-issues/gitlab.example.com_8443/group/sub/proj"
+    )
+    with pytest.raises(ValueError, match="already source 'proj'"):
+        config.add_source(
+            path, {"name": "x", "type": "gitlab-issues", "url": url + "/-/issues"}
+        )
+    assert config.remove_source(path, "proj").url == url
+    assert path.read_text() == ""
+
+
+def test_source_names(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text(
+        '[[sources]]\npath = "~/a/done.md"\n[[sources]]\npath = "~/b/done.md"\n'
+    )
+    with pytest.raises(ValueError, match="two sources named 'done'"):
+        config.load(path)
+    with pytest.raises(ValueError, match="invalid source name"):
+        config.add_source(tmp_path / "other.toml", {"name": "a b", "path": "~/c.md"})
+    with pytest.raises(ValueError, match="unknown source type"):
+        config.add_source(tmp_path / "other.toml", {"type": "jira", "url": "x"})
+    with pytest.raises(ValueError, match="not a GitLab project URL"):
+        config.add_source(
+            tmp_path / "other.toml", {"type": "gitlab-issues", "url": "gitlab.com/a/b"}
+        )
 
 
 def test_set_values_before_the_first_table(tmp_path):

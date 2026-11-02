@@ -6,6 +6,8 @@
     llm = "gemma-4-e2b"              # optional, or any GGUF file: "REPO/FILE.gguf"
 
     [[sources]]
+    name = "done"                    # optional: the file's stem, the directory's name
+    type = "local"                   # optional: files read where they are
     path = "~/work/done.md"
     # split = "auto"                 # auto | dates | headings
     # delimiters = ['^## \\d{4}-']   # regexes selecting the date lines, if auto-detection fails
@@ -15,6 +17,10 @@
     path = "~/notes"
     glob = "**/*.md"
     exclude = ["archive/**"]
+
+    [[sources]]
+    type = "gitlab-issues"           # mirrored by `ogmios fetch`, one file per issue
+    url = "https://gitlab.example.com/group/project"
 
 `add_source`, `remove_source` and `set_value` edit the file as text, so that comments and
 layout are kept, and check the result before writing it.
@@ -28,17 +34,30 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import gitlab
 from .ask import DEFAULT_LLM, llm_spec
 from .embed import DEFAULT_MODEL, MODELS
 from .parse import SplitOptions
 
+LOCAL = "local"
+GITLAB_ISSUES = "gitlab-issues"
+TYPES = (LOCAL, GITLAB_ISSUES)
+_NAME_RE = re.compile(r"[A-Za-z0-9][\w.-]*")
+
 
 @dataclass
 class Source:
-    path: Path
+    path: Path  # a file or a directory; for a fetched source, where it is mirrored
     glob: str = "**/*.md"
     exclude: list[str] = field(default_factory=list)
     options: SplitOptions = field(default_factory=SplitOptions)
+    name: str = ""
+    type: str = LOCAL
+    url: str | None = None  # what a fetched source mirrors
+
+    @property
+    def fetched(self) -> bool:
+        return self.type != LOCAL
 
     def files(self) -> list[Path]:
         if self.path.is_file():
@@ -86,6 +105,11 @@ def data_dir() -> Path:
     return _xdg("XDG_DATA_HOME", ".local/share") / "ogmios"
 
 
+def gitlab_dir() -> Path:
+    """Where the issues of `gitlab-issues` sources are mirrored."""
+    return data_dir() / "gitlab-issues"
+
+
 def cache_dir() -> Path:
     return _xdg("XDG_CACHE_HOME", ".cache") / "ogmios"
 
@@ -105,6 +129,13 @@ def _parse(text: str) -> Config:
     except tomllib.TOMLDecodeError as e:
         raise ValueError(f"invalid config: {e}") from None
     sources = [_source(entry) for entry in raw.get("sources", [])]
+    seen: set[str] = set()
+    for source in sources:
+        if source.name in seen:
+            raise ValueError(
+                f"two sources named {source.name!r}: give one a `name` in the config"
+            )
+        seen.add(source.name)
     model = raw.get("model", DEFAULT_MODEL)
     if model not in MODELS:
         raise ValueError(
@@ -119,6 +150,26 @@ def _parse(text: str) -> Config:
 
 
 def _source(entry: dict) -> Source:
+    kind = entry.get("type", LOCAL)
+    if kind == GITLAB_ISSUES:
+        if "url" not in entry:
+            raise ValueError("a gitlab-issues source without a url")
+        url = gitlab.project_url(entry["url"])
+        return Source(
+            path=gitlab.mirror_dir(gitlab_dir(), url),
+            glob="*.md",
+            options=gitlab.SPLIT,
+            name=_name(entry.get("name") or gitlab.default_name(url)),
+            type=kind,
+            url=url,
+        )
+    if kind != LOCAL:
+        raise ValueError(
+            f"unknown source type {kind!r}, expected one of: {', '.join(TYPES)}"
+        )
+    if "path" not in entry:
+        raise ValueError("a local source without a path")
+    path = Path(entry["path"]).expanduser()
     options = SplitOptions(
         split=entry.get("split", "auto"),
         delimiters=[re.compile(p) for p in entry.get("delimiters", [])],
@@ -129,41 +180,69 @@ def _source(entry: dict) -> Source:
             f"invalid split {options.split!r} for source {entry['path']!r}"
         )
     return Source(
-        path=Path(entry["path"]).expanduser(),
+        path=path,
         glob=entry.get("glob", "**/*.md"),
         exclude=entry.get("exclude", []),
         options=options,
+        name=_name(entry.get("name") or default_name(path)),
     )
 
 
+def default_name(path: Path) -> str:
+    """A local source's name when the config gives none: "done" for ~/work/done.md."""
+    return path.stem if path.suffix else path.name
+
+
+def _name(name: str) -> str:
+    if not _NAME_RE.fullmatch(name):
+        raise ValueError(
+            f"invalid source name {name!r}: letters, digits, '.', '-' and '_' only"
+        )
+    return name
+
+
 def add_source(config_file: Path, entry: dict) -> Source:
-    """Append a `[[sources]]` table; `entry` holds its keys, `path` first."""
+    """Append a `[[sources]]` table; `entry` holds its keys, in the order to write them."""
     text = _read(config_file)
-    target = Path(entry["path"]).expanduser().resolve()
-    if any(s.path.resolve() == target for s in _parse(text).sources):
-        raise ValueError(f"{entry['path']} is already a source")
+    sources = _parse(text).sources
+    added = _source(entry)
+    for s in sources:
+        if s.name == added.name:
+            raise ValueError(
+                f"there is already a source named {added.name!r}, choose another --name"
+            )
+        if (s.url or s.path.resolve()) == (added.url or added.path.resolve()):
+            raise ValueError(
+                f"{added.url or entry['path']} is already source {s.name!r}"
+            )
     table = "[[sources]]\n" + "".join(f"{k} = {_toml(v)}\n" for k, v in entry.items())
     text = text.rstrip("\n") + "\n\n" + table if text.strip() else table
     return _write(config_file, text).sources[-1]
 
 
-def remove_source(config_file: Path, path: Path) -> None:
-    lines = _read(config_file).splitlines(keepends=True)
-    target = path.expanduser().resolve()
+def remove_source(config_file: Path, name: str) -> Source:
+    """Remove the source named `name`, and return it."""
+    text = _read(config_file)
+    sources = _parse(text).sources
+    lines = text.splitlines(keepends=True)
     headers = [i for i, line in enumerate(lines) if _TABLE_RE.match(line)]
-    for start, end in zip(headers, [*headers[1:], len(lines)]):
-        if lines[start].split("#")[0].strip() != "[[sources]]":
-            continue
-        entry = tomllib.loads("".join(lines[start + 1 : end]))
-        if Path(entry.get("path", "")).expanduser().resolve() != target:
+    tables = [
+        (start, end)
+        for start, end in zip(headers, [*headers[1:], len(lines)])
+        if lines[start].split("#")[0].strip() == "[[sources]]"
+    ]
+    # The n-th [[sources]] table is the n-th source.
+    for source, (start, end) in zip(sources, tables):
+        if source.name != name:
             continue
         # Comment lines right above the next table describe that one: keep them.
         while end > start + 1 and lines[end - 1].lstrip().startswith("#"):
             end -= 1
         del lines[start:end]
         _write(config_file, re.sub(r"\n{3,}", "\n\n", "".join(lines)))
-        return
-    raise ValueError(f"{path} is not a configured source")
+        return source
+    names = ", ".join(s.name for s in sources) or "none"
+    raise ValueError(f"no source named {name!r} (sources: {names})")
 
 
 def set_value(config_file: Path, key: str, value: str) -> None:

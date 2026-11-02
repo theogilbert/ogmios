@@ -50,6 +50,7 @@ _PATTERNS = [
 
 _WEEKDAY_RE = re.compile(rf"\b(?:{'|'.join(WEEKDAYS)})\b\.?", re.IGNORECASE)
 _DECORATION_RE = re.compile(r"[\W_]+")
+_EDGES_RE = re.compile(r"^[\W_]+|[\W_]+$")
 HEADING_RE = re.compile(r"^ {0,3}#{1,6}\s")
 
 MAX_HEADER_LEN = 80
@@ -139,7 +140,8 @@ def delimiter_candidate(
 
 def _label(line: str, match: DateMatch) -> str:
     rest = _WEEKDAY_RE.sub(" ", line[: match.start] + " " + line[match.end :])
-    words = [w for w in (_DECORATION_RE.sub(" ", w).strip() for w in rest.split()) if w]
+    # Decoration around words ("**Reprise**", "—"), not inside them ("group/proj#5").
+    words = [w for w in (_EDGES_RE.sub("", w) for w in rest.split()) if w]
     return " ".join(words)
 
 

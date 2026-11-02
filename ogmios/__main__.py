@@ -1,8 +1,10 @@
 import argparse
+import getpass
 import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import time
@@ -10,7 +12,7 @@ from dataclasses import replace
 from datetime import date
 from pathlib import Path
 
-from . import ask, config, hub, journal, store
+from . import ask, config, gitlab, hub, journal, store
 from .embed import MODELS, Embedder
 from .parse import SplitOptions, chunk_section, parse_file
 from .search import is_about_anything
@@ -41,8 +43,7 @@ def parse_cli_args() -> argparse.Namespace:
         help="index database",
     )
     parser.add_argument(
-        "-s",
-        "--source",
+        "--path",
         action="append",
         type=Path,
         help="file or directory of notes, instead of the configured sources (repeatable)",
@@ -76,6 +77,13 @@ def parse_cli_args() -> argparse.Namespace:
         help="answer a question from the notes (refreshes the index first)",
     )
     question.add_argument("question", nargs="+")
+    question.add_argument(
+        "-s",
+        "--source",
+        action="append",
+        metavar="NAME",
+        help="search only this source (repeatable; default: all of them)",
+    )
     question.add_argument(
         "-n",
         "--days",
@@ -133,10 +141,37 @@ def parse_cli_args() -> argparse.Namespace:
     )
     status.set_defaults(func=cmd_status)
 
-    cfg = commands.add_parser("config", help="change the configuration")
-    cfg_commands = cfg.add_subparsers(required=True)
-    add = cfg_commands.add_parser("add", help="add a file or directory of notes")
+    fetch = commands.add_parser(
+        "fetch",
+        help="update the mirror of fetched sources, such as GitLab issues",
+        description="Fetch what changed since the last fetch in sources that are not"
+        " local files: the issues of a GitLab project. The token is read from"
+        " $GITLAB_TOKEN, else asked for; it is never stored.",
+    )
+    fetch.add_argument("name", nargs="*", help="only these sources (default: all)")
+    fetch.add_argument(
+        "--full",
+        action="store_true",
+        help="fetch everything again, and forget what was deleted since",
+    )
+    fetch.set_defaults(func=cmd_fetch)
+
+    src = commands.add_parser("source", help="list, add or remove sources")
+    src_commands = src.add_subparsers(required=True)
+    listing = src_commands.add_parser("list", help="list the sources")
+    listing.set_defaults(func=cmd_source_list)
+    remove = src_commands.add_parser(
+        "remove", help="stop indexing a source (and delete its mirror, if fetched)"
+    )
+    remove.add_argument("name")
+    remove.set_defaults(func=cmd_source_remove)
+    src_add = src_commands.add_parser("add", help="add a source")
+    add_types = src_add.add_subparsers(required=True, metavar="TYPE")
+    add = add_types.add_parser(
+        config.LOCAL, help="a file or directory of notes, read where it is"
+    )
     add.add_argument("path", type=Path)
+    add.add_argument("--name", help="what to call it (default: the file or directory)")
     add.add_argument("--glob", help="files to index in a directory (default: **/*.md)")
     add.add_argument(
         "--exclude",
@@ -158,10 +193,19 @@ def parse_cli_args() -> argparse.Namespace:
     add.add_argument(
         "--month-first", action="store_true", help="03/04/2024 is March the 4th"
     )
-    add.set_defaults(func=cmd_config_add)
-    remove = cfg_commands.add_parser("remove", help="stop indexing a source")
-    remove.add_argument("path", type=Path)
-    remove.set_defaults(func=cmd_config_remove)
+    add.set_defaults(func=cmd_source_add_local)
+    add_gitlab = add_types.add_parser(
+        config.GITLAB_ISSUES,
+        help="the issues of a GitLab project, mirrored by `ogmios fetch`",
+    )
+    add_gitlab.add_argument("url", help="the project's URL, https://HOST/GROUP/PROJECT")
+    add_gitlab.add_argument(
+        "--name", help="what to call it (default: the project's name)"
+    )
+    add_gitlab.set_defaults(func=cmd_source_add_gitlab)
+
+    cfg = commands.add_parser("config", help="change the configuration")
+    cfg_commands = cfg.add_subparsers(required=True)
     model = cfg_commands.add_parser("model", help="show or set the embedding model")
     model.add_argument("name", nargs="?", choices=sorted(MODELS))
     model.set_defaults(func=cmd_config_model)
@@ -182,14 +226,20 @@ def parse_cli_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _load(args: argparse.Namespace) -> tuple[config.Config, Embedder]:
+def _config(args: argparse.Namespace) -> config.Config:
     cfg = config.load(args.config)
-    if args.source:
-        cfg.sources = [config.Source(path=p.expanduser()) for p in args.source]
+    if args.path:
+        cfg.sources = [
+            config.Source(path=p.expanduser(), name=config.default_name(p))
+            for p in args.path
+        ]
+    return cfg
+
+
+def _load(args: argparse.Namespace) -> tuple[config.Config, Embedder]:
+    cfg = _config(args)
     if not cfg.sources:
-        raise ValueError(
-            f"no sources: pass --source or configure them in {args.config}"
-        )
+        raise ValueError("no sources: add one with `ogmios source add`, or pass --path")
     embedder = Embedder(args.model or cfg.model, config.cache_dir() / "models")
     # Before the index is touched, rather than halfway through re-embedding it.
     if not embedder.downloaded:
@@ -313,6 +363,7 @@ def _ask(
         clock = now
 
     started = clock
+    paths = _scope(cfg, args.source)
     db = _refresh(args, cfg, embedder, spinner=spinner)
     lap("index")
     today = date.today()
@@ -328,11 +379,12 @@ def _ask(
         lap("wordings")
     if not whole:
         spinner.status("searching the notes")
-    hits, excerpts = ask.gather(db, embedder, topic, period, args.days, wordings)
+    hits, excerpts = ask.gather(db, embedder, topic, period, args.days, wordings, paths)
     lap("search")
     if not excerpts:
         where = f" from {period} ({period.words})" if period else ""
         raise ValueError(f"no notes{where} to answer from")
+    excerpts = _with_urls(cfg, excerpts)
     chat = ask.messages(question, excerpts, today)
     if args.prompt:
         if wordings:
@@ -395,7 +447,34 @@ def _ask(
         print()
     for i, e in enumerate(excerpts, 1):
         if e in sources:
-            print(f"[{i}] {e.date or e.title} | {e.path}:{e.line}")
+            where = e.url or f"{e.path}:{e.line}"
+            print(f"[{i}] {e.date or e.title} | {where}")
+
+
+def _scope(cfg: config.Config, names: list[str] | None) -> list[str] | None:
+    """The files of the sources named, or None for all of them."""
+    if not names:
+        return None
+    by_name = {s.name: s for s in cfg.sources}
+    unknown = [n for n in names if n not in by_name]
+    if unknown:
+        raise ValueError(
+            f"no source named {', '.join(map(repr, unknown))}"
+            f" (sources: {', '.join(by_name) or 'none'})"
+        )
+    files = store.collect_files(cfg.sources)
+    return [str(f) for f, source in files.items() if source.name in names]
+
+
+def _with_urls(cfg: config.Config, excerpts: list[ask.Excerpt]) -> list[ask.Excerpt]:
+    """Excerpts of mirrored issues point at the issue on the web."""
+    mirrors = [s.path.resolve() for s in cfg.sources if s.type == config.GITLAB_ISSUES]
+    return [
+        replace(e, url=gitlab.issue_url(Path(e.path)))
+        if any(Path(e.path).is_relative_to(m) for m in mirrors)
+        else e
+        for e in excerpts
+    ]
 
 
 def _log(**fields) -> None:
@@ -463,9 +542,7 @@ def cmd_inspect(args: argparse.Namespace) -> None:
 
 
 def cmd_status(args: argparse.Namespace) -> None:
-    cfg = config.load(args.config)
-    if args.source:
-        cfg.sources = [config.Source(path=p.expanduser()) for p in args.source]
+    cfg = _config(args)
     embedder = Embedder(args.model or cfg.model, config.cache_dir() / "models")
 
     def overridden(variable: str) -> str:
@@ -500,17 +577,10 @@ def cmd_status(args: argparse.Namespace) -> None:
         print(f"  {config.tilde(llm)}  ({_size(llm)})")
 
     print(
-        "\nsources" + ("" if cfg.sources else "  none, pass --source or configure them")
+        "\nsources"
+        + ("" if cfg.sources else "  none, add one with `ogmios source add`")
     )
-    for source in cfg.sources:
-        if source.path.is_dir():
-            where = f"{config.tilde(source.path)}/{source.glob}"
-            found = _plural(len(source.files()), "file")
-        else:
-            where = config.tilde(source.path)
-            found = "file" if source.path.is_file() else "missing"
-        split = source.options.split
-        print(f"  {where}  ({found}, split: {split})")
+    _print_sources(cfg.sources)
 
     if not args.db.exists():
         return
@@ -539,11 +609,44 @@ def cmd_status(args: argparse.Namespace) -> None:
         print(f"  stale: {', '.join(reasons)} (the next search re-indexes)")
 
 
-def cmd_config_add(args: argparse.Namespace) -> None:
+def _print_sources(sources: list[config.Source]) -> None:
+    width = max((len(s.name) for s in sources), default=0)
+    for source in sources:
+        if source.type == config.GITLAB_ISSUES:
+            where = source.url
+            n = len(source.files())
+            found = (
+                f"{_plural(n, 'issue')}, mirrored in {config.tilde(source.path)}"
+                if source.path.is_dir()
+                else f"not fetched yet, run `ogmios fetch {source.name}`"
+            )
+        elif source.path.is_dir():
+            where = f"{config.tilde(source.path)}/{source.glob}"
+            found = (
+                f"{_plural(len(source.files()), 'file')}, split: {source.options.split}"
+            )
+        else:
+            where = config.tilde(source.path)
+            state = "file" if source.path.is_file() else "missing"
+            found = f"{state}, split: {source.options.split}"
+        print(f"  {source.name:<{width}}  {source.type:<13}  {where}  ({found})")
+
+
+def cmd_source_list(args: argparse.Namespace) -> None:
+    sources = _config(args).sources
+    if not sources:
+        print("no sources, add one with `ogmios source add`")
+    _print_sources(sources)
+
+
+def cmd_source_add_local(args: argparse.Namespace) -> None:
     path = args.path.expanduser().absolute()
     if not path.exists():
         raise ValueError(f"{args.path}: no such file or directory")
-    entry: dict = {"path": config.tilde(path)}
+    entry: dict = {}
+    if args.name:
+        entry["name"] = args.name
+    entry |= {"type": config.LOCAL, "path": config.tilde(path)}
     if args.glob:
         entry["glob"] = args.glob
     if args.exclude:
@@ -561,12 +664,82 @@ def cmd_config_add(args: argparse.Namespace) -> None:
         entry["day_first"] = False
     source = config.add_source(args.config, entry)
     found = _plural(len(source.files()), "file") if path.is_dir() else "file"
-    print(f"added {entry['path']} ({found}), indexed on the next search")
+    print(
+        f"added source {source.name}: {entry['path']} ({found}),"
+        " indexed on the next search"
+    )
 
 
-def cmd_config_remove(args: argparse.Namespace) -> None:
-    config.remove_source(args.config, args.path)
-    print(f"removed {config.tilde(args.path)}")
+def cmd_source_add_gitlab(args: argparse.Namespace) -> None:
+    entry: dict = {}
+    if args.name:
+        entry["name"] = args.name
+    entry |= {"type": config.GITLAB_ISSUES, "url": gitlab.project_url(args.url)}
+    source = config.add_source(args.config, entry)
+    print(
+        f"added source {source.name}: the issues of {source.url},"
+        f" run `ogmios fetch {source.name}` to mirror them"
+    )
+
+
+def cmd_source_remove(args: argparse.Namespace) -> None:
+    source = config.remove_source(args.config, args.name)
+    print(f"removed source {source.name}")
+    if source.fetched and source.path.is_dir():
+        shutil.rmtree(source.path)
+        print(f"  deleted its mirror, {config.tilde(source.path)}")
+
+
+def cmd_fetch(args: argparse.Namespace) -> None:
+    cfg = config.load(args.config)
+    fetched = [s for s in cfg.sources if s.fetched]
+    if args.name:
+        by_name = {s.name: s for s in cfg.sources}
+        for name in args.name:
+            if name not in by_name:
+                raise ValueError(
+                    f"no source named {name!r} (sources: {', '.join(by_name) or 'none'})"
+                )
+            if not by_name[name].fetched:
+                raise ValueError(f"{name} is a local source, there is nothing to fetch")
+        fetched = [by_name[n] for n in dict.fromkeys(args.name)]
+    if not fetched:
+        raise ValueError(
+            "no source to fetch, add one with `ogmios source add gitlab-issues URL`"
+        )
+    tokens: dict[str, str | None] = {}
+    interactive = sys.stderr.isatty()
+    for source in fetched:
+        assert source.url is not None
+        host = gitlab.host(source.url)
+        if host not in tokens:
+            tokens[host] = _gitlab_token(host)
+        with Spinner(enabled=interactive) as spinner:
+            spinner.status(f"fetching {source.name}")
+            stats = gitlab.fetch(
+                source.url,
+                source.path,
+                tokens[host],
+                full=args.full,
+                progress=lambda n, name=source.name: spinner.status(
+                    f"fetching {name}: {_plural(n, 'issue')}"
+                ),
+            )
+        removed = f", {stats.removed} removed" if stats.removed else ""
+        print(
+            f"{source.name}: {_plural(stats.written, 'issue')} updated{removed},"
+            " indexed on the next search"
+        )
+
+
+def _gitlab_token(host: str) -> str | None:
+    """$GITLAB_TOKEN, else asked for; none for a public project."""
+    if token := os.environ.get("GITLAB_TOKEN"):
+        return token
+    if not sys.stdin.isatty():
+        return None
+    token = getpass.getpass(f"GitLab token for {host} (empty for a public project): ")
+    return token.strip() or None
 
 
 def cmd_config_model(args: argparse.Namespace) -> None:
@@ -597,7 +770,7 @@ def cmd_config_show(args: argparse.Namespace) -> None:
     if not args.config.exists():
         raise ValueError(
             f"no config file at {config.tilde(args.config)},"
-            " add a source with `ogmios config add PATH`"
+            " add a source with `ogmios source add`"
         )
     print(args.config.read_text(encoding="utf-8"), end="")
 
@@ -618,6 +791,8 @@ _TEMPLATE = """\
 # llm = "gemma-4-e2b"       # or any GGUF file on Hugging Face: "REPO/FILE.gguf"
 
 # [[sources]]
+# name = "done"                          # default: the file's stem
+# type = "local"                         # the default
 # path = "~/work/done.md"
 # split = "auto"                         # auto | dates | headings
 # delimiters = ['^## \\d{4}-\\d{2}-\\d{2}'] # if auto-detection gets it wrong
@@ -627,6 +802,10 @@ _TEMPLATE = """\
 # path = "~/notes"
 # glob = "**/*.md"
 # exclude = ["archive/**"]
+
+# [[sources]]
+# type = "gitlab-issues"                 # mirrored by `ogmios fetch`
+# url = "https://gitlab.example.com/group/project"
 """
 
 

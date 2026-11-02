@@ -93,7 +93,7 @@ def test_cited_sources():
 def test_json_result():
     excerpts = [
         ask.Excerpt("/n/done.md", 3, "2024-01-01", "2024-01-01", "x"),
-        ask.Excerpt("/n/ideas.md", 7, None, "Ideas", "y"),
+        ask.Excerpt("/n/ideas.md", 7, None, "Ideas", "y", url="https://g/i/7"),
     ]
     result = ask.result("when?", "On the 1st [1].", excerpts)
     assert result["answer"] == "On the 1st [1]."
@@ -104,6 +104,7 @@ def test_json_result():
             "title": "2024-01-01",
             "path": "/n/done.md",
             "line": 3,
+            "url": None,
             "cited": True,
         },
         {
@@ -112,6 +113,7 @@ def test_json_result():
             "title": "Ideas",
             "path": "/n/ideas.md",
             "line": 7,
+            "url": "https://g/i/7",
             "cited": False,
         },
     ]

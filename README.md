@@ -76,10 +76,12 @@ interrupted download resumes where it stopped on the next run.
 From the command line:
 
 ```sh
-ogmios config add ~/work/done.md                 # a file of daily notes
-ogmios config add ~/notes --exclude "archive/**" # every **/*.md under a directory
-ogmios config add ~/journal.md --month-first --delimiter '^## \d{4}'
-ogmios config remove ~/notes
+ogmios source add local ~/work/done.md                 # a file of daily notes
+ogmios source add local ~/notes --exclude "archive/**" # every **/*.md under a directory
+ogmios source add local ~/journal.md --month-first --delimiter '^## \d{4}'
+ogmios source add gitlab-issues https://gitlab.example.com/group/project  # see below
+ogmios source list
+ogmios source remove notes                       # sources go by name
 ogmios config model e5-small                     # show or set the embedding model
 ogmios config llm REPO/FILE.gguf                 # show or set the LLM (see below)
                                                  # (then `ogmios install` installs them)
@@ -87,7 +89,9 @@ ogmios config show                               # print the file
 ogmios config edit                               # open it in $EDITOR
 ```
 
-These edit `~/.config/ogmios/config.toml` in place, keeping its comments. By hand:
+These edit `~/.config/ogmios/config.toml` in place, keeping its comments. Each source
+has a name, the file's stem or the directory's name unless given with `--name`, by which
+`ask -s NAME` searches it alone. By hand:
 
 ```toml
 # model = "e5-small-int8"   # or "e5-small" (fp32, 470 MB, same results, slower)
@@ -95,6 +99,8 @@ These edit `~/.config/ogmios/config.toml` in place, keeping its comments. By han
 # llm = "gemma-4-e2b"       # or any GGUF file on Hugging Face (see below)
 
 [[sources]]
+# name = "done"                          # the default: the file's stem
+# type = "local"                         # the default: files read where they are
 path = "~/work/done.md"
 # split = "auto"                         # auto | dates | headings
 # delimiters = ['^## \d{4}-\d{2}-\d{2}'] # if auto-detection gets it wrong
@@ -104,7 +110,32 @@ path = "~/work/done.md"
 path = "~/notes"
 glob = "**/*.md"
 exclude = ["archive/**"]
+
+[[sources]]
+type = "gitlab-issues"
+url = "https://gitlab.example.com/group/project"
 ```
+
+### GitLab issues
+
+A `gitlab-issues` source is the issues of a GitLab project, comments included, mirrored
+on the machine by `ogmios fetch`. It is the only command that goes on the network; `ask`
+and `index` read the mirror as they read notes.
+
+```sh
+ogmios fetch                  # every gitlab-issues source: what changed since the last fetch
+ogmios fetch project          # this one only
+ogmios fetch --full           # everything again, also forgetting deleted issues
+```
+
+The token is read from `$GITLAB_TOKEN`, else asked for (empty for a public project); it is
+never written anywhere. A token with the `read_api` scope is enough.
+
+Each issue is a markdown file, under the data directory (`ogmios source list` shows
+where): its title, state, labels and assignees, then its description and comments under
+the day they were written, so that "what was said about the export last week?" works as
+for notes. Of GitLab's automatic notes ("added ~bug label"), only closing and reopening
+are kept. The answer cites an issue by its URL. `ogmios source remove` deletes the mirror.
 
 ### Another LLM
 
@@ -136,6 +167,7 @@ ogmios inspect ~/work/done.md --chunks   # and what gets embedded
 ```sh
 ogmios index                         # first run: embeds everything (ask also does it)
 ogmios ask "..."
+ogmios ask -s done -s project "..."  # only these sources (repeatable; default: all)
 ogmios ask --prompt "..."            # what the model would be given, without the answer
 ogmios ask --literal "..."           # the question's own words only, ~2 s faster
 ogmios ask --json "..."              # one JSON object, for editor plugins
@@ -153,17 +185,18 @@ excerpt.
 
 `--json` prints, once the answer is written, `{"question", "wordings", "answer",
 "warnings", "excerpts"}`, where `wordings` is what was searched besides the question, and
-each excerpt the model read is `{"n", "date", "title", "path", "line", "cited"}`: `n` is
-the number the answer cites it by, `date` is null for a section without one, and `line`
-is 1-based. Progress goes to stderr; on failure, stdout is empty, the message is on
+each excerpt the model read is `{"n", "date", "title", "path", "line", "url", "cited"}`:
+`n` is the number the answer cites it by, `date` is null for a section without one, `line`
+is 1-based, and `url` is null but for an issue. Progress goes to stderr; on failure, stdout is empty, the message is on
 stderr and the exit status is non-zero.
 
-The days the answer cites are printed after it, as `[n] day | path:line`.
+The days the answer cites are printed after it, as `[n] day | path:line`, or
+`[n] day | URL` for an issue.
 
 `ogmios status` shows where the config, index and models are stored, what each source
 matches, and whether the index is up to date.
 
-`-s/--source PATH` reads a file or directory instead of the configured sources.
+`--path PATH` reads a file or directory instead of the configured sources.
 `OGMIOS_CONFIG` and `OGMIOS_DB` override the config and index locations.
 
 ### The log, and reporting back without the notes

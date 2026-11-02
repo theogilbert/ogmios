@@ -94,20 +94,31 @@ def is_about_anything(query: str) -> bool:
     )
 
 
-def _period_filter(period: Period | None) -> tuple[str, list[str]]:
-    """SQL condition on sections `s`, and its parameters."""
-    if period is None:
-        return "1", []
-    return "s.date BETWEEN ? AND ?", [period.start.isoformat(), period.end.isoformat()]
+def section_filter(
+    period: Period | None, paths: list[str] | None = None, table: str = "s"
+) -> tuple[str, list[str]]:
+    """SQL condition on the sections `table`, and its parameters: within the period, and
+    in the files `paths`, when given."""
+    conditions, params = ["1"], []
+    if period is not None:
+        conditions.append(f"{table}.date BETWEEN ? AND ?")
+        params += [period.start.isoformat(), period.end.isoformat()]
+    if paths is not None:
+        conditions.append(f"{table}.path IN ({','.join('?' * len(paths))})")
+        params += paths
+    return " AND ".join(conditions), params
 
 
 def _fts_ranking(
-    db: sqlite3.Connection, terms: list[str], period: Period | None
+    db: sqlite3.Connection,
+    terms: list[str],
+    period: Period | None,
+    paths: list[str] | None,
 ) -> list[int]:
     if not terms:
         return []
     expression = " OR ".join(f'"{t}"' if " " in t else f'"{t}"*' for t in terms)
-    condition, params = _period_filter(period)
+    condition, params = section_filter(period, paths)
     rows = db.execute(
         "SELECT f.rowid FROM chunks_fts f"
         " JOIN chunks c ON c.id = f.rowid JOIN sections s ON s.id = c.section_id"
@@ -118,9 +129,13 @@ def _fts_ranking(
 
 
 def _vector_ranking(
-    db: sqlite3.Connection, embedder: Embedder, q: np.ndarray, period: Period | None
+    db: sqlite3.Connection,
+    embedder: Embedder,
+    q: np.ndarray,
+    period: Period | None,
+    paths: list[str] | None,
 ) -> list[int]:
-    condition, params = _period_filter(period)
+    condition, params = section_filter(period, paths)
     rows = db.execute(
         "SELECT c.id, e.vector FROM chunks c"
         " JOIN embeddings e ON e.hash = c.hash AND e.model = ?"
@@ -144,17 +159,18 @@ def search(
     query: str,
     limit: int = 20,
     period: Period | None = None,
+    paths: list[str] | None = None,  # only these files, if given
 ) -> list[Hit]:
     terms = query_terms(query)
     rankings = [
         (
             KEYWORD_WEIGHT if embedder is not None else 1.0,
-            _fts_ranking(db, terms, period),
+            _fts_ranking(db, terms, period, paths),
         )
     ]
     q = embedder.query(query) if embedder is not None else None
     if embedder is not None and q is not None:
-        rankings.append((1.0, _vector_ranking(db, embedder, q, period)))
+        rankings.append((1.0, _vector_ranking(db, embedder, q, period, paths)))
 
     chunk_scores: dict[int, float] = {}
     for weight, ranking in rankings:

@@ -162,9 +162,10 @@ def parse_cli_args() -> argparse.Namespace:
 
     fetch = commands.add_parser(
         "fetch",
-        help="update the mirror of fetched sources, such as GitLab issues",
+        help="update the mirror of fetched sources: GitLab issues and merge requests",
         description="Fetch what changed since the last fetch in sources that are not"
-        " local files: the issues of a GitLab project. The token is read from"
+        " local files: the issues or merge requests of a GitLab project, with their"
+        " comments. The token is read from"
         " $GITLAB_TOKEN, else asked for; it is never stored.",
     )
     fetch.add_argument("name", nargs="*", help="only these sources (default: all)")
@@ -213,15 +214,18 @@ def parse_cli_args() -> argparse.Namespace:
         "--month-first", action="store_true", help="03/04/2024 is March the 4th"
     )
     add.set_defaults(func=cmd_source_add_local)
-    add_gitlab = add_types.add_parser(
-        config.GITLAB_ISSUES,
-        help="the issues of a GitLab project, mirrored by `ogmios fetch`",
-    )
-    add_gitlab.add_argument("url", help="the project's URL, https://HOST/GROUP/PROJECT")
-    add_gitlab.add_argument(
-        "--name", help="what to call it (default: the project's name)"
-    )
-    add_gitlab.set_defaults(func=cmd_source_add_gitlab)
+    for kind in gitlab.KINDS.values():
+        add_gitlab = add_types.add_parser(
+            kind.type,
+            help=f"the {kind.noun}s of a GitLab project, mirrored by `ogmios fetch`",
+        )
+        add_gitlab.add_argument(
+            "url", help="the project's URL, https://HOST/GROUP/PROJECT"
+        )
+        add_gitlab.add_argument(
+            "--name", help=f"what to call it (default: PROJECT{kind.name_suffix})"
+        )
+        add_gitlab.set_defaults(func=cmd_source_add_gitlab, kind=kind)
 
     cfg = commands.add_parser("config", help="change the configuration")
     cfg_commands = cfg.add_subparsers(required=True)
@@ -573,10 +577,10 @@ def _scope(cfg: config.Config, names: list[str] | None) -> list[str] | None:
 
 
 def _with_urls(cfg: config.Config, excerpts: list[ask.Excerpt]) -> list[ask.Excerpt]:
-    """Excerpts of mirrored issues point at the issue on the web."""
-    mirrors = [s.path.resolve() for s in cfg.sources if s.type == config.GITLAB_ISSUES]
+    """Excerpts of mirrored issues and merge requests point at them on the web."""
+    mirrors = [s.path.resolve() for s in cfg.sources if s.fetched]
     return [
-        replace(e, url=gitlab.issue_url(Path(e.path)))
+        replace(e, url=gitlab.web_url(Path(e.path)))
         if any(Path(e.path).is_relative_to(m) for m in mirrors)
         else e
         for e in excerpts
@@ -719,11 +723,12 @@ def cmd_status(args: argparse.Namespace) -> None:
 def _print_sources(sources: list[config.Source]) -> None:
     width = max((len(s.name) for s in sources), default=0)
     for source in sources:
-        if source.type == config.GITLAB_ISSUES:
+        if source.fetched:
             where = source.url
             n = len(source.files())
+            noun = gitlab.KINDS[source.type].noun
             found = (
-                f"{_plural(n, 'issue')}, mirrored in {config.tilde(source.path)}"
+                f"{_plural(n, noun)}, mirrored in {config.tilde(source.path)}"
                 if source.path.is_dir()
                 else f"not fetched yet, run `ogmios fetch {source.name}`"
             )
@@ -781,10 +786,10 @@ def cmd_source_add_gitlab(args: argparse.Namespace) -> None:
     entry: dict = {}
     if args.name:
         entry["name"] = args.name
-    entry |= {"type": config.GITLAB_ISSUES, "url": gitlab.project_url(args.url)}
+    entry |= {"type": args.kind.type, "url": gitlab.project_url(args.url)}
     source = config.add_source(args.config, entry)
     print(
-        f"added source {source.name}: the issues of {source.url},"
+        f"added source {source.name}: the {args.kind.noun}s of {source.url},"
         f" run `ogmios fetch {source.name}` to mirror them"
     )
 
@@ -813,12 +818,14 @@ def cmd_fetch(args: argparse.Namespace) -> None:
     if not fetched:
         raise ValueError(
             "no source to fetch, add one with `ogmios source add gitlab-issues URL`"
+            " or `gitlab-mrs URL`"
         )
     tokens: dict[str, str | None] = {}
     interactive = sys.stderr.isatty()
     for source in fetched:
         assert source.url is not None
         host = gitlab.host(source.url)
+        kind = gitlab.KINDS[source.type]
         if host not in tokens:
             tokens[host] = _gitlab_token(host)
         with Spinner(enabled=interactive) as spinner:
@@ -827,25 +834,26 @@ def cmd_fetch(args: argparse.Namespace) -> None:
                 source.url,
                 source.path,
                 tokens[host],
+                kind,
                 full=args.full,
-                progress=lambda n, name=source.name: spinner.status(
-                    f"fetching {name}: {_plural(n, 'issue')}"
+                progress=lambda n, name=source.name, noun=kind.noun: spinner.status(
+                    f"fetching {name}: {_plural(n, noun)}"
                 ),
             )
         removed = f", {stats.removed} removed" if stats.removed else ""
         print(
-            f"{source.name}: {_plural(stats.written, 'issue')} updated{removed},"
+            f"{source.name}: {_plural(stats.written, kind.noun)} updated{removed},"
             " indexed on the next search"
         )
 
 
 def _gitlab_token(host: str) -> str | None:
-    """$GITLAB_TOKEN, else asked for; none for a public project."""
+    """$GITLAB_TOKEN, else asked for; some servers read public projects without one."""
     if token := os.environ.get("GITLAB_TOKEN"):
         return token
     if not sys.stdin.isatty():
         return None
-    token = getpass.getpass(f"GitLab token for {host} (empty for a public project): ")
+    token = getpass.getpass(f"GitLab token for {host} (empty for none): ")
     return token.strip() or None
 
 
@@ -919,7 +927,7 @@ _TEMPLATE = """\
 # exclude = ["archive/**"]
 
 # [[sources]]
-# type = "gitlab-issues"                 # mirrored by `ogmios fetch`
+# type = "gitlab-issues"                 # or "gitlab-mrs", mirrored by `ogmios fetch`
 # url = "https://gitlab.example.com/group/project"
 """
 

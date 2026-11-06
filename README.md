@@ -85,6 +85,7 @@ ogmios source add local ~/work/done.md                 # a file of daily notes
 ogmios source add local ~/notes --exclude "archive/**" # every **/*.md under a directory
 ogmios source add local ~/journal.md --month-first --delimiter '^## \d{4}'
 ogmios source add gitlab-issues https://gitlab.example.com/group/project  # see below
+ogmios source add gitlab-mrs https://gitlab.example.com/group/project     # its merge requests
 ogmios source list
 ogmios source remove notes                       # sources go by name
 ogmios config model e5-small                     # show or set the embedding model
@@ -119,7 +120,7 @@ glob = "**/*.md"
 exclude = ["archive/**"]
 
 [[sources]]
-type = "gitlab-issues"
+type = "gitlab-issues"                   # or "gitlab-mrs"
 url = "https://gitlab.example.com/group/project"
 ```
 
@@ -130,26 +131,35 @@ embeddings use the physical cores. `threads` caps all three, and `$OGMIOS_THREAD
 overrides it for one run; a lower cap is slower, not worse. The tests and
 `scripts/eval.py` use 4 unless `$OGMIOS_THREADS` says otherwise.
 
-### GitLab issues
+### GitLab issues and merge requests
 
-A `gitlab-issues` source is the issues of a GitLab project, comments included, mirrored
-on the machine by `ogmios fetch`. It is the only command that goes on the network; `ask`
-and `index` read the mirror as they read notes.
+A `gitlab-issues` source is the issues of a GitLab project, comments included, and a
+`gitlab-mrs` source its merge requests, threads included. A project can have both, the
+second named `PROJECT-mrs` by default. `ogmios fetch` mirrors them on the machine. It is
+the only command that goes on the network; `ask` and `index` read the mirror as they read
+notes.
 
 ```sh
-ogmios fetch                  # every gitlab-issues source: what changed since the last fetch
+ogmios fetch                  # every GitLab source: what changed since the last fetch
 ogmios fetch project          # this one only
-ogmios fetch --full           # everything again, also forgetting deleted issues
+ogmios fetch --full           # everything again, also forgetting what was deleted
 ```
 
-The token is read from `$GITLAB_TOKEN`, else asked for (empty for a public project); it is
-never written anywhere. A token with the `read_api` scope is enough.
+The token is read from `$GITLAB_TOKEN`, else asked for; it is never written anywhere. A
+token with the `read_api` scope is enough. gitlab.com asks for one to read comments, even
+on a public project.
 
 Each issue is a markdown file, under the data directory (`ogmios source list` shows
 where): its title, state, labels and assignees, then its description and comments under
 the day they were written, so that "what was said about the export last week?" works as
 for notes. Of GitLab's automatic notes ("added ~bug label"), only closing and reopening
 are kept. The answer cites an issue by its URL. `ogmios source remove` deletes the mirror.
+
+A merge request is written the same way, with its title, reviewers and source branch; the
+title and the branch are on each day, so that a comment is found by either. A thread stays
+together under its first comment, with the file and line it was left on, and a reply on a
+later day says which thread it answers. Approvals and the merge are kept, the commits and
+the changes themselves are not.
 
 ### Another LLM
 

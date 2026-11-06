@@ -54,6 +54,22 @@ def test_gitlab_issues_source(tmp_path, monkeypatch):
     assert path.read_text() == ""
 
 
+def test_a_project_can_have_both_gitlab_sources(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    path = tmp_path / "config.toml"
+    url = "https://gitlab.example.com/group/proj"
+    issues = config.add_source(path, {"type": "gitlab-issues", "url": url})
+    mrs = config.add_source(path, {"type": "gitlab-mrs", "url": url})
+    assert (issues.name, mrs.name) == ("proj", "proj-mrs")
+    assert mrs.fetched
+    assert mrs.path == (
+        tmp_path / "data/ogmios/gitlab-mrs/gitlab.example.com/group/proj"
+    )
+    assert mrs.path != issues.path
+    with pytest.raises(ValueError, match="already source 'proj-mrs'"):
+        config.add_source(path, {"name": "x", "type": "gitlab-mrs", "url": url})
+
+
 def test_source_names(tmp_path):
     path = tmp_path / "config.toml"
     path.write_text(

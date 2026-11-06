@@ -23,6 +23,10 @@
     type = "gitlab-issues"           # mirrored by `ogmios fetch`, one file per issue
     url = "https://gitlab.example.com/group/project"
 
+    [[sources]]
+    type = "gitlab-mrs"              # the same, per merge request
+    url = "https://gitlab.example.com/group/project"
+
 `add_source`, `remove_source` and `set_value` edit the file as text, so that comments and
 layout are kept, and check the result before writing it.
 """
@@ -41,8 +45,7 @@ from .embed import DEFAULT_MODEL, MODELS
 from .parse import SplitOptions
 
 LOCAL = "local"
-GITLAB_ISSUES = "gitlab-issues"
-TYPES = (LOCAL, GITLAB_ISSUES)
+TYPES = (LOCAL, *gitlab.KINDS)
 _NAME_RE = re.compile(r"[A-Za-z0-9][\w.-]*")
 
 
@@ -107,11 +110,6 @@ def data_dir() -> Path:
     return _xdg("XDG_DATA_HOME", ".local/share") / "ogmios"
 
 
-def gitlab_dir() -> Path:
-    """Where the issues of `gitlab-issues` sources are mirrored."""
-    return data_dir() / "gitlab-issues"
-
-
 def cache_dir() -> Path:
     return _xdg("XDG_CACHE_HOME", ".cache") / "ogmios"
 
@@ -168,15 +166,17 @@ def _parse(text: str) -> Config:
 
 def _source(entry: dict) -> Source:
     kind = entry.get("type", LOCAL)
-    if kind == GITLAB_ISSUES:
+    if kind in gitlab.KINDS:
         if "url" not in entry:
-            raise ValueError("a gitlab-issues source without a url")
+            raise ValueError(f"a {kind} source without a url")
         url = gitlab.project_url(entry["url"])
         return Source(
-            path=gitlab.mirror_dir(gitlab_dir(), url),
+            path=gitlab.mirror_dir(data_dir() / kind, url),
             glob="*.md",
             options=gitlab.SPLIT,
-            name=_name(entry.get("name") or gitlab.default_name(url)),
+            name=_name(
+                entry.get("name") or gitlab.default_name(url, gitlab.KINDS[kind])
+            ),
             type=kind,
             url=url,
         )
@@ -228,7 +228,7 @@ def add_source(config_file: Path, entry: dict) -> Source:
             raise ValueError(
                 f"there is already a source named {added.name!r}, choose another --name"
             )
-        if (s.url or s.path.resolve()) == (added.url or added.path.resolve()):
+        if s.path.resolve() == added.path.resolve():
             raise ValueError(
                 f"{added.url or entry['path']} is already source {s.name!r}"
             )

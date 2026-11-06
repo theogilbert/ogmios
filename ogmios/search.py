@@ -109,21 +109,26 @@ def section_filter(
     return " AND ".join(conditions), params
 
 
+def _fts_term(term: str) -> str:
+    return f'"{term}"' if " " in term else f'"{term}"*'
+
+
 def _fts_ranking(
     db: sqlite3.Connection,
     terms: list[str],
     period: Period | None,
     paths: list[str] | None,
+    candidates: int = CANDIDATES,
 ) -> list[int]:
     if not terms:
         return []
-    expression = " OR ".join(f'"{t}"' if " " in t else f'"{t}"*' for t in terms)
+    expression = " OR ".join(_fts_term(t) for t in terms)
     condition, params = section_filter(period, paths)
     rows = db.execute(
         "SELECT f.rowid FROM chunks_fts f"
         " JOIN chunks c ON c.id = f.rowid JOIN sections s ON s.id = c.section_id"
         f" WHERE chunks_fts MATCH ? AND {condition} ORDER BY bm25(chunks_fts) LIMIT ?",
-        (expression, *params, CANDIDATES),
+        (expression, *params, candidates),
     ).fetchall()
     return [r[0] for r in rows]
 
@@ -134,6 +139,7 @@ def _vector_ranking(
     q: np.ndarray,
     period: Period | None,
     paths: list[str] | None,
+    candidates: int = CANDIDATES,
 ) -> list[int]:
     condition, params = section_filter(period, paths)
     rows = db.execute(
@@ -149,7 +155,7 @@ def _vector_ranking(
         len(rows), -1
     )
     scores = matrix @ (q / np.linalg.norm(q)) / np.linalg.norm(matrix, axis=1)
-    top = np.argsort(-scores)[:CANDIDATES]
+    top = np.argsort(-scores)[:candidates]
     return [int(i) for i in ids[top]]
 
 
@@ -160,17 +166,21 @@ def search(
     limit: int = 20,
     period: Period | None = None,
     paths: list[str] | None = None,  # only these files, if given
+    closest_line: bool = True,  # slow with many days: embeds their lines
+    candidates: int = CANDIDATES,  # chunks per ranking, of which days are made
 ) -> list[Hit]:
     terms = query_terms(query)
     rankings = [
         (
             KEYWORD_WEIGHT if embedder is not None else 1.0,
-            _fts_ranking(db, terms, period, paths),
+            _fts_ranking(db, terms, period, paths, candidates),
         )
     ]
     q = embedder.query(query) if embedder is not None else None
     if embedder is not None and q is not None:
-        rankings.append((1.0, _vector_ranking(db, embedder, q, period, paths)))
+        rankings.append(
+            (1.0, _vector_ranking(db, embedder, q, period, paths, candidates))
+        )
 
     chunk_scores: dict[int, float] = {}
     for weight, ranking in rankings:
@@ -216,14 +226,14 @@ def search(
             or content
             or [start]
         )
-        line, matched = _best_line(lines, content, terms)
+        line, matched = best_line(lines, content, terms)
         if not matched:
             unmatched.append((len(hits), content))
         snippet = lines[line].strip() if line < len(lines) else ""
         chunks = [c for _, c in sorted(scored[section], key=lambda item: -item[0])]
         hits.append(Hit(path, line + 1, title, date, snippet, score, section, chunks))
 
-    if embedder is not None and q is not None and unmatched:
+    if closest_line and embedder is not None and q is not None and unmatched:
         # No query word on any line: point at the line closest in meaning.
         texts = [
             file_lines[hits[h].path][i].strip()
@@ -239,6 +249,55 @@ def search(
             hits[h] = replace(hits[h], line=closest + 1, snippet=snippet)
 
     return hits
+
+
+def earliest_matches(
+    db: sqlite3.Connection,
+    query: str,
+    per_term: int,
+    period: Period | None = None,
+    paths: list[str] | None = None,
+) -> list[Hit]:
+    """For each word of the query, the first dated days that hold it, whatever their
+    relevance: search ranks a day low that only mentions a word in passing, which may
+    well be the first time it was written."""
+    condition, params = section_filter(period, paths)
+    file_lines: dict[str, list[str]] = {}
+    found: dict[int, Hit] = {}
+    for term in query_terms(query):
+        rows = db.execute(
+            "SELECT c.kind, c.start_line, c.end_line, s.id, s.path, s.title, s.date"
+            " FROM chunks_fts f JOIN chunks c ON c.id = f.rowid"
+            " JOIN sections s ON s.id = c.section_id"
+            f" WHERE chunks_fts MATCH ? AND s.date IS NOT NULL AND {condition}"
+            " ORDER BY s.date, s.path, s.start_line, c.end_line - c.start_line",
+            (_fts_term(term), *params),
+        )
+        days: set[int] = set()
+        for kind, start, end, section, path, title, day in rows:
+            if section in days:  # its smallest chunk came first
+                continue
+            if len(days) == per_term:
+                break
+            days.add(section)
+            if section in found:
+                continue
+            if path not in file_lines:
+                file_lines[path] = (
+                    Path(path)
+                    .read_text(encoding="utf-8", errors="replace")
+                    .splitlines()
+                )
+            lines = file_lines[path]
+            content = [
+                i for i in range(start, min(end, len(lines))) if not blank(lines[i])
+            ] or [start]
+            line, _ = best_line(lines, content, [term])
+            snippet = lines[line].strip() if line < len(lines) else ""
+            found[section] = Hit(
+                path, line + 1, title, day, snippet, 0.0, section, [(kind, start, end)]
+            )
+    return list(found.values())
 
 
 def merge(*rankings: list[Hit]) -> list[Hit]:
@@ -266,7 +325,7 @@ def _fold(text: str) -> str:
     )
 
 
-def _best_line(
+def best_line(
     lines: list[str], content: list[int], terms: list[str]
 ) -> tuple[int, bool]:
     """The line matching the most query terms, else the first; and whether any matched."""

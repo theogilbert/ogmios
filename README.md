@@ -57,6 +57,11 @@ Everything runs on the CPU. No server, no GPU, nothing in memory between questio
   answers, cite them at the end of each sentence, and say when they do not hold the
   answer. Its file is memory-mapped, so it loads in about a second; most
   of the wait is the model reading the notes, at ~170 tokens/s on a 6-core laptop CPU.
+- **Every time, or the first time.** One read of the excerpts cannot hold everything, and
+  a small model asked to list things lists some of them. `ask --all` and `--first` have
+  the model judge the days found one at a time instead, each with a yes, a mention or a
+  no, then put the answer together in code: lines of the notes themselves, with their
+  dates (see [Every time, or the first time](#every-time-or-the-first-time)).
 - **Freshness.** `ask` re-indexes first when a file changed. Only new or edited text is
   re-embedded, so this is near-instant after the first run.
 
@@ -171,6 +176,8 @@ ogmios ask -s done -s project "..."  # only these sources (repeatable; default: 
 ogmios ask --prompt "..."            # what the model would be given, without the answer
 ogmios ask --literal "..."           # the question's own words only, ~2 s faster
 ogmios ask --json "..."              # one JSON object, for editor plugins
+ogmios ask --all "..."               # every time it happened
+ogmios ask --first "..."             # the first time it happened
 ogmios bad --day 2024-03-14 "..."    # the last answer was wrong; that day holds the right one
 ogmios report                        # statistics of the questions asked, nothing of the notes
 ```
@@ -198,6 +205,41 @@ matches, and whether the index is up to date.
 
 `--path PATH` reads a file or directory instead of the configured sources.
 `OGMIOS_CONFIG` and `OGMIOS_DB` override the config and index locations.
+
+### Every time, or the first time
+
+```
+$ ogmios ask --first "when was the first time I applied terraform on our projects?"
+2022-09-12  terraform apply sur ingestion-api : buckets et service accounts désormais gérés en code [22]
+2022-09-29  Imported the composer-prod bucket into the Terraform state [24]
+2022-10-17  Module terraform pour les service accounts, revue avec Hugo [26]
+2022-11-08  terraform plan was failing on the IAM bindings, fixed the provider version [27]
+2022-12-05  Passage de reporting-api sous terraform, plan propre [30]
+
+First in the days checked: 2022-09-12 [22]
+Checked 30 of 114 days found, oldest first.
+
+[22] 2022-09-12 | ~/notes/long.md:94
+...
+```
+
+- **`--all`** judges every day found, up to 100, and lists those the model says yes of, in
+  date order once all are read. Search rank says little here: a day that says it in other
+  words may rank far down.
+- **`--first`** judges them oldest first, along with the oldest days holding each word
+  of the question, whatever their rank. It stops once a day judged yes holds a word of the
+  question; a yes in other words does not stop it, and comes back as "possibly earlier",
+  since the model now and then says yes of something else.
+- **The lines are the notes' own,** picked by the code, not written by the model. Dates
+  cannot be misquoted, but the line shown may not be the one that made the model say yes.
+- **What was not read is said** on the last line. "First" means first among the days
+  checked in your notes, and days without a date come last, read only if nothing before
+  stopped the search.
+- **Synonyms are the weak spot.** A day is only judged if the search finds it, and the model
+  can turn down a note that does not name the subject (see `scripts/eval.py scan`, which
+  has cases in other words). Use the words of the notes when you know them.
+
+`--json` adds `mode` and `coverage`, the last line above.
 
 ### The log, and reporting back without the notes
 
@@ -241,8 +283,9 @@ day, not from the model; the rest from the model misreading what it was given.
   semaine du 14 mars", "Q1 2024", "last summer") narrows the search to that period before
   anything is read, so that other years do not compete. It is shown on stderr: check it
   is the period you meant.
-- **One question at a time.** For something that happened several times, ask for all of
-  them: "list every time I…" rather than "when did I…".
+- **One question at a time.** For something that happened several times, use `--all`, and
+  `--first` for when it started: see
+  [Every time, or the first time](#every-time-or-the-first-time).
 - **Summaries of a period** ("what did I do last week?") read the period's days whole,
   most recent first, until the budget is spent: a week reads in full, a year does not.
   Ask about a topic over a long period instead ("what did I do on the k8s migration in
@@ -294,6 +337,7 @@ uv run python scripts/eval.py search     # rank of the expected day, per embeddi
 uv run python scripts/eval.py budget     # per excerpt budget: day found, read, or cut
 uv run python scripts/eval.py budget --llm               # ...and whether the answer cites it
 uv run python scripts/eval.py budget --private --llm     # on the answers marked bad
+uv run python scripts/eval.py scan       # --all and --first against one read, with the LLM
 ```
 
 `budget --private` runs, against the configured index, the answers marked bad with

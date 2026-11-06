@@ -136,5 +136,12 @@ def test_report_holds_nothing_of_the_notes():
     assert "33% cite nothing, 33% with a flagged date" in out
 
 
+def test_report_counts_scans_apart():
+    out = journal.report([record(), record(mode="all", hits=[hit(1, "2024-03-03")])])
+    assert "50% --all or --first" in out
+    assert "search  1" in out
+    assert "scans  1" in out
+
+
 def test_empty_report():
     assert journal.report([]) == "no question logged"

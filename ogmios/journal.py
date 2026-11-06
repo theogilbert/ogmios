@@ -42,6 +42,7 @@ def ask_record(
     prompt_tokens: int | None,
     answer_tokens: int,
     seconds: dict[str, float],
+    mode: str = "lookup",
 ) -> dict:
     """What the log keeps of a question: enough to see again what the model was given,
     and to measure it without reading it."""
@@ -54,6 +55,7 @@ def ask_record(
         "at": datetime.now().isoformat(timespec="seconds"),
         "today": today.isoformat(),
         "question": question,
+        "mode": mode,  # lookup, or how `ask --all` and `--first` read the days
         "words": len(re.findall(r"\w+", question)),
         "language": asking.language_of(question),
         "period": period
@@ -194,7 +196,11 @@ def report(records: list[dict]) -> str:
         r["ask"]: r for r in records if r.get("type") == "bad" and r["ask"] in by_id
     }
     n = len(asks)
-    searched = [a for a in asks if not a["whole"]]
+    # What a scan reads is not limited the way a single read is: counted apart.
+    scans = [a for a in asks if a.get("mode", "lookup") != "lookup"]
+    searched = [
+        a for a in asks if not a["whole"] and a.get("mode", "lookup") == "lookup"
+    ]
     answered = [a for a in asks if a["answer"] is not None]
     timed = [a["seconds"] for a in asks]
 
@@ -205,7 +211,8 @@ def report(records: list[dict]) -> str:
             [
                 *(f"{_pct(k, n)} {lang}" for lang, k in _counts(asks, "language")),
                 f"{_pct(sum(a['period'] is not None for a in asks), n)} with a period",
-                f"{_pct(n - len(searched), n)} reading a period whole",
+                f"{_pct(sum(a['whole'] for a in asks), n)} reading a period whole",
+                f"{_pct(len(scans), n)} --all or --first",
                 f"{_pct(sum(a['literal'] for a in asks), n)} --literal",
             ]
         ),
@@ -230,6 +237,12 @@ def report(records: list[dict]) -> str:
             f"  days cut       {_dist([a['cut'] for a in searched])}  ({cut} of searches)",
             f"  last rank read {_dist([a['worst_read'] for a in searched if a['excerpts']])}",
         ]
+    if scans:
+        lines += [
+            f"scans  {len(scans)}",
+            f"  days found     {_dist([len(a['hits']) for a in scans])}",
+            f"  days checked   {_dist([len(a['excerpts']) for a in scans])}",
+        ]
     lines += [
         "prompt",
         f"  chars   {_dist([a['prompt_chars'] for a in asks])}",
@@ -244,6 +257,7 @@ def report(records: list[dict]) -> str:
                 "search",
                 "read",
                 "write",
+                "scan",
                 "total",
             )
         ),

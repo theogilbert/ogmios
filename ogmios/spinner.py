@@ -46,6 +46,14 @@ class Spinner:
         with self._lock:
             print((CLEAR if self.enabled else "") + message, file=self._out, flush=True)
 
+    def answer(self, line: str) -> None:
+        """A line of the answer, on stdout, while the status keeps turning below it."""
+        with self._lock:
+            if self.enabled:
+                self._out.write(CLEAR)
+                self._out.flush()
+            print(line, flush=True)
+
     def stop(self) -> None:
         """Clear the status line, for the answer to take its place."""
         if self._thread is None:

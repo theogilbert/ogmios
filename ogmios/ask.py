@@ -58,7 +58,7 @@ _URL_RE = re.compile(
 CONTEXT_TOKENS: int = 4096  # scripts/eval.py raises it for larger budgets
 # About 2.5k tokens of notes (French takes ~2.5 characters a token), read at ~170 tokens/s
 # on a laptop CPU: most of the time to the answer.
-BUDGET_CHARS = 6_000
+BUDGET_CHARS: int = 6_000  # scripts/eval.py sweeps it
 EXCERPT_CHARS = 2_500  # a long day is cut down to the lines around the hit
 # What the best part of each day may take, at most; the rest goes to more of the best
 # days, whose other parts may hold the answer when their best one only shares its words.
@@ -151,6 +151,23 @@ def excerpts_for(db: sqlite3.Connection, hits: list[Hit]) -> list[Excerpt]:
     excerpts = [day.excerpt() for day in chosen]
     # In the order they were written: "when" is easier to answer from a timeline.
     return sorted(excerpts, key=lambda e: (e.date or "", e.path, e.line))
+
+
+def best_parts(db: sqlite3.Connection, hits: list[Hit], chars: int) -> list[Excerpt]:
+    """Of each day, in the order of `hits`, the part that matches best, and its other
+    parts that matched while within `chars`."""
+    file_lines: dict[str, list[str]] = {}
+    excerpts = []
+    for hit in hits:
+        day = _Day.of(db, hit, file_lines)
+        if day is None or not day.selected:
+            continue
+        for lines in day.matched:
+            if len(day.text(lines)) <= chars:
+                day.selected |= lines
+        if day.text():
+            excerpts.append(day.excerpt())
+    return excerpts
 
 
 class _Day:

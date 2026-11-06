@@ -12,12 +12,14 @@ from dataclasses import replace
 from datetime import date
 from pathlib import Path
 
-from . import ask, config, gitlab, hub, journal, store
+from . import ask, config, gitlab, hub, journal, scan, store
 from .embed import MODELS, Embedder
 from .parse import SplitOptions, chunk_section, parse_file
 from .search import is_about_anything
 from .spinner import Spinner
 from .when import find_period
+
+DEFAULT_DAYS = 20
 
 
 def main() -> None:
@@ -88,8 +90,25 @@ def parse_cli_args() -> argparse.Namespace:
         "-n",
         "--days",
         type=int,
-        default=20,
-        help="most days of notes to read, as many as fit (default: 20)",
+        help="most days of notes to read, as many as fit (default: 20); with --first"
+        " and --all, the days to check (default: those found, up to 100)",
+    )
+    kind = question.add_mutually_exclusive_group()
+    kind.add_argument(
+        "--all",
+        dest="mode",
+        action="store_const",
+        const=scan.ALL,
+        help="list every time it happened: checks the days found one by one, up to 100"
+        " (~0.5-3 s a day)",
+    )
+    kind.add_argument(
+        "--first",
+        dest="mode",
+        action="store_const",
+        const=scan.FIRST,
+        help="find the first time it happened: checks the days found one by one, oldest"
+        " first, until one shows it (~0.5-3 s a day)",
     )
     question.add_argument(
         "--prompt",
@@ -368,7 +387,11 @@ def _ask(
     lap("index")
     today = date.today()
     period, topic = find_period(question, today) or (None, question)
-    whole = period is not None and is_about_anything(topic)
+    if args.mode:
+        topic = scan.subject(topic)
+        if is_about_anything(topic):
+            raise ValueError(f"--{args.mode} needs a subject to look for")
+    whole = not args.mode and period is not None and is_about_anything(topic)
     llm, wordings = None, ""
     if not whole and not args.literal:
         spinner.status("loading the model")
@@ -379,12 +402,72 @@ def _ask(
         lap("wordings")
     if not whole:
         spinner.status("searching the notes")
-    hits, excerpts = ask.gather(db, embedder, topic, period, args.days, wordings, paths)
+    if args.mode:
+        hits, found = scan.candidates(
+            db, embedder, topic, args.mode, period, args.days, wordings, paths
+        )
+        excerpts = scan.excerpts_for(db, hits)
+    else:
+        hits, excerpts = ask.gather(
+            db, embedder, topic, period, args.days or DEFAULT_DAYS, wordings, paths
+        )
     lap("search")
     if not excerpts:
         where = f" from {period} ({period.words})" if period else ""
         raise ValueError(f"no notes{where} to answer from")
     excerpts = _with_urls(cfg, excerpts)
+    if args.mode:
+        if args.prompt:
+            _print_scan_prompt(topic, wordings, excerpts)
+            return
+        if llm is None:
+            spinner.status("loading the model")
+            llm = ask.load(model)  # ty: ignore[invalid-argument-type]
+            lap("load")
+        state = scan.Scan(args.mode, topic, wordings, excerpts, found)
+        run = scan.run(
+            llm,
+            state,
+            lambda number, total: spinner.status(f"checking day {number} of {total}"),
+        )
+        lines: list[str] = []
+        for verdict in run:
+            if scan.shown(state, verdict):
+                lines.append(scan.line(state, verdict))
+                if not args.json:
+                    spinner.answer(lines[-1])
+        spinner.stop()
+        lap("scan")
+        seconds["total"] = time.monotonic() - started
+        closing = scan.conclusion(state)
+        text = "\n".join([*lines, *closing]).strip()
+        _log(
+            question=question,
+            today=today,
+            period=period,
+            whole=False,
+            wordings=wordings,
+            literal=args.literal,
+            days=len(hits),
+            llm=cfg.llm,
+            model=embedder.name,
+            hits=hits,
+            excerpts=state.read,
+            chat=[m for chat in state.chats for m in chat],
+            answer=text,
+            prompt_tokens=sum(ask.prompt_tokens(llm, c) for c in state.chats),
+            answer_tokens=state.tokens,
+            seconds=seconds,
+            mode=args.mode,
+        )
+        if args.json:
+            result = ask.result(question, text, state.read, wordings)
+            result |= {"mode": args.mode, "coverage": scan.coverage(state)}
+            print(json.dumps(result, ensure_ascii=False))
+            return
+        print("\n".join(closing).strip("\n") if not lines else "\n".join(closing))
+        _print_cited(text, state.read)
+        return
     chat = ask.messages(question, excerpts, today)
     if args.prompt:
         if wordings:
@@ -421,7 +504,7 @@ def _ask(
         whole=whole,
         wordings=wordings,
         literal=args.literal,
-        days=args.days,
+        days=args.days or DEFAULT_DAYS,
         llm=cfg.llm,
         model=embedder.name,
         hits=hits,
@@ -442,6 +525,10 @@ def _ask(
             f"ogmios: {wrong} is not a date of the notes read, check it",
             file=sys.stderr,
         )
+    _print_cited(text, excerpts)
+
+
+def _print_cited(text: str, excerpts: list[ask.Excerpt]) -> None:
     sources = ask.cited(text, excerpts)
     if sources:
         print()
@@ -449,6 +536,15 @@ def _ask(
         if e in sources:
             where = e.url or f"{e.path}:{e.line}"
             print(f"[{i}] {e.date or e.title} | {where}")
+
+
+def _print_scan_prompt(topic: str, wordings: str, excerpts: list[ask.Excerpt]) -> None:
+    print(f"--- asked about\n{topic}")
+    if wordings:
+        print(f"--- searched besides it\n{wordings}")
+    print(f"--- system, for each day\n{scan.SYSTEM}")
+    for i, excerpt in enumerate(excerpts[: scan.MAX_DAYS], 1):
+        print(f"--- day {i}\n{scan.messages(topic, excerpt)[1]['content']}")
 
 
 def _scope(cfg: config.Config, names: list[str] | None) -> list[str] | None:

@@ -7,6 +7,7 @@ memory-mapped, so loading it takes about a second and nothing needs to stay runn
 between questions.
 """
 
+import os
 import re
 import sqlite3
 from collections.abc import Iterator
@@ -441,7 +442,16 @@ def model_path(spec: LLMSpec, cache_dir: Path) -> Path | None:
 _quiet = None  # see `answer`
 
 
-def load(model: Path) -> "llama_cpp.Llama":
+def thread_counts(threads: int | None) -> tuple[int | None, int | None]:
+    """Threads to write and to read: llama.cpp's defaults, half of the logical CPUs and
+    all of them, down to the cap if they are over it."""
+    if threads is None:
+        return None, None
+    cpus = os.cpu_count() or 1
+    return min(threads, max(cpus // 2, 1)), min(threads, cpus)
+
+
+def load(model: Path, threads: int | None = None) -> "llama_cpp.Llama":
     # Imported here: loading llama.cpp would slow down every other command.
     import ctypes
 
@@ -452,10 +462,13 @@ def load(model: Path) -> "llama_cpp.Llama":
     global _quiet
     _quiet = llama_cpp.llama_log_callback(lambda level, text, user_data: None)
     llama_cpp.llama_log_set(_quiet, ctypes.c_void_p(0))
+    writing, reading = thread_counts(threads)
     llm = llama_cpp.Llama(
         str(model),
         n_ctx=CONTEXT_TOKENS,
         swa_full=False,  # the sliding-window layers keep only their window
+        n_threads=writing,
+        n_threads_batch=reading,
         verbose=False,
     )
     template = llm.metadata.get("tokenizer.chat_template", "")

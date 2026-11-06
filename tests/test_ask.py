@@ -191,3 +191,11 @@ def test_unpinned_llm_is_not_installed(tmp_path):
     assert path == tmp_path / "google--gemma-4-E4B-it-qat-q4_0-gguf" / SHA / (
         "gemma-4-E4B_q4_0-it.gguf"
     )
+
+
+def test_threads_are_a_cap_on_what_llama_cpp_would_use(monkeypatch):
+    monkeypatch.setattr(ask.os, "cpu_count", lambda: 12)
+    assert ask.thread_counts(None) == (None, None)
+    assert ask.thread_counts(4) == (4, 4)
+    assert ask.thread_counts(8) == (6, 8)
+    assert ask.thread_counts(64) == (6, 12)

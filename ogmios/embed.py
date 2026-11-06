@@ -60,12 +60,15 @@ DEFAULT_MODEL = "e5-small-int8"
 
 
 class Embedder:
-    def __init__(self, name: str, cache_dir: Path) -> None:
+    def __init__(self, name: str, cache_dir: Path, threads: int | None = None) -> None:
         if name not in MODELS:
             raise ValueError(
                 f"unknown model {name!r}, expected one of: {', '.join(MODELS)}"
             )
         self.name = name
+        self.threads = (
+            threads  # at most; None: ONNX Runtime's choice, its physical cores
+        )
         self.spec = MODELS[name]
         self.dir = hub.model_dir(cache_dir, self.spec.repo, self.spec.revision)
         self._loaded: (
@@ -137,6 +140,9 @@ class Embedder:
 
         options = onnxruntime.SessionOptions()
         options.log_severity_level = 3  # errors only
+        if self.threads:
+            cores = max((os.cpu_count() or 2) // 2, 1)
+            options.intra_op_num_threads = min(self.threads, cores)
         return onnxruntime.InferenceSession(
             str(self._file(self.spec.model_file)),
             options,

@@ -237,6 +237,14 @@ def parse_cli_args() -> argparse.Namespace:
     )
     llm.add_argument("name", nargs="?", metavar="LLM")
     llm.set_defaults(func=cmd_config_llm)
+    threads = cfg_commands.add_parser(
+        "threads",
+        help="show or set the most CPU threads to use",
+        description="Show or set the most CPU threads ogmios uses, for embeddings and the"
+        " LLM; 0 for no cap. $OGMIOS_THREADS overrides it.",
+    )
+    threads.add_argument("number", nargs="?", type=int)
+    threads.set_defaults(func=cmd_config_threads)
     show = cfg_commands.add_parser("show", help="print the config file")
     show.set_defaults(func=cmd_config_show)
     edit = cfg_commands.add_parser("edit", help="open the config file in $EDITOR")
@@ -259,7 +267,9 @@ def _load(args: argparse.Namespace) -> tuple[config.Config, Embedder]:
     cfg = _config(args)
     if not cfg.sources:
         raise ValueError("no sources: add one with `ogmios source add`, or pass --path")
-    embedder = Embedder(args.model or cfg.model, config.cache_dir() / "models")
+    embedder = Embedder(
+        args.model or cfg.model, config.cache_dir() / "models", cfg.threads
+    )
     # Before the index is touched, rather than halfway through re-embedding it.
     if not embedder.downloaded:
         raise ValueError(
@@ -395,7 +405,7 @@ def _ask(
     llm, wordings = None, ""
     if not whole and not args.literal:
         spinner.status("loading the model")
-        llm = ask.load(model)  # ty: ignore[invalid-argument-type]
+        llm = ask.load(model, cfg.threads)  # ty: ignore[invalid-argument-type]
         lap("load")
         spinner.status("thinking of other wordings")
         wordings = ask.other_wordings(llm, topic)
@@ -422,7 +432,7 @@ def _ask(
             return
         if llm is None:
             spinner.status("loading the model")
-            llm = ask.load(model)  # ty: ignore[invalid-argument-type]
+            llm = ask.load(model, cfg.threads)  # ty: ignore[invalid-argument-type]
             lap("load")
         state = scan.Scan(args.mode, topic, wordings, excerpts, found)
         run = scan.run(
@@ -483,7 +493,7 @@ def _ask(
         print(f"ogmios: {reading}", file=sys.stderr)
     if llm is None:
         spinner.status("loading the model")
-        llm = ask.load(model)  # ty: ignore[invalid-argument-type]
+        llm = ask.load(model, cfg.threads)  # ty: ignore[invalid-argument-type]
         lap("load")
     spinner.status(reading)
     written: list[str] = []
@@ -660,6 +670,7 @@ def cmd_status(args: argparse.Namespace) -> None:
         size = hub.human(sum(f.stat().st_size for f in files)) if files else "empty"
         print(f"  log     {config.tilde(log)}  ({size}){overridden('OGMIOS_LOG')}")
 
+    print(f"\nthreads  {cfg.threads or 'no cap'}{overridden('OGMIOS_THREADS')}")
     print(f"\nmodel  {embedder.name}  ({embedder.spec.repo})")
     if embedder.downloaded:
         print(f"  {config.tilde(embedder.dir)}  ({_size(embedder.dir)})")
@@ -862,6 +873,13 @@ def cmd_config_llm(args: argparse.Namespace) -> None:
         print(f"llm set to {value}, run `ogmios install`")
 
 
+def cmd_config_threads(args: argparse.Namespace) -> None:
+    if args.number is not None:
+        config.set_value(args.config, "threads", args.number)
+    threads = config.load(args.config).threads
+    print(threads if threads else "no cap")
+
+
 def cmd_config_show(args: argparse.Namespace) -> None:
     if not args.config.exists():
         raise ValueError(
@@ -885,6 +903,7 @@ _TEMPLATE = """\
 # model = "e5-small-int8"   # or "e5-small" (fp32, slower, same results)
 #                           # or "e5-base-int8" (larger, slower, see the README)
 # llm = "gemma-4-e2b"       # or any GGUF file on Hugging Face: "REPO/FILE.gguf"
+# threads = 4               # at most this many CPU threads (default: no cap)
 
 # [[sources]]
 # name = "done"                          # default: the file's stem

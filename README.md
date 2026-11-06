@@ -90,6 +90,7 @@ ogmios source remove notes                       # sources go by name
 ogmios config model e5-small                     # show or set the embedding model
 ogmios config llm REPO/FILE.gguf                 # show or set the LLM (see below)
                                                  # (then `ogmios install` installs them)
+ogmios config threads 4                          # show or set the most CPU threads (0: no cap)
 ogmios config show                               # print the file
 ogmios config edit                               # open it in $EDITOR
 ```
@@ -102,6 +103,7 @@ has a name, the file's stem or the directory's name unless given with `--name`, 
 # model = "e5-small-int8"   # or "e5-small" (fp32, 470 MB, same results, slower)
 #                           # or "e5-base-int8" (280 MB, ~40% slower, ~600 MB peak)
 # llm = "gemma-4-e2b"       # or any GGUF file on Hugging Face (see below)
+# threads = 4               # at most this many CPU threads (default: no cap)
 
 [[sources]]
 # name = "done"                          # the default: the file's stem
@@ -120,6 +122,13 @@ exclude = ["archive/**"]
 type = "gitlab-issues"
 url = "https://gitlab.example.com/group/project"
 ```
+
+### CPU threads
+
+By default the LLM reads with every logical CPU and writes with half of them, and
+embeddings use the physical cores. `threads` caps all three, and `$OGMIOS_THREADS`
+overrides it for one run; a lower cap is slower, not worse. The tests and
+`scripts/eval.py` use 4 unless `$OGMIOS_THREADS` says otherwise.
 
 ### GitLab issues
 

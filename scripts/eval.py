@@ -16,12 +16,16 @@ can be shared where the notes may not go.
 """
 
 import argparse
+import os
 import statistics
 import sys
 import tempfile
 import time
 from datetime import date
 from pathlib import Path
+
+# Unless told otherwise: read by config.load.
+os.environ.setdefault("OGMIOS_THREADS", "4")
 
 from ogmios import ask, config, journal, scan, store
 from ogmios import search as search_module
@@ -143,7 +147,8 @@ def fixture_db(embedder: Embedder, tmp: str):
 
 def eval_search(args: argparse.Namespace) -> None:
     for name in args.models or list(MODELS):
-        embedder = Embedder(name, config.cache_dir() / "models")
+        threads = config.load(config.config_path()).threads
+        embedder = Embedder(name, config.cache_dir() / "models", threads)
         with tempfile.TemporaryDirectory() as tmp:
             db = fixture_db(embedder, tmp)
             for label, emb, weight in (
@@ -189,7 +194,7 @@ def private_cases() -> list[dict]:
 def eval_budget(args: argparse.Namespace) -> None:
     budgets = [int(b) for b in args.budgets.split(",")]
     cfg = config.load(config.config_path())
-    embedder = Embedder(cfg.model, config.cache_dir() / "models")
+    embedder = Embedder(cfg.model, config.cache_dir() / "models", cfg.threads)
     if args.private:
         cases = private_cases()
         if not cases:
@@ -213,7 +218,7 @@ def run(args, cfg, embedder, db, cases, budgets) -> None:
             sys.exit(f"LLM {cfg.llm} is not installed, run `ogmios install`")
         # Room for the largest budget: French takes ~2.5 characters a token.
         ask.CONTEXT_TOKENS = max(4096, int(max(budgets) / 2) + 2048)
-        llm = ask.load(model)
+        llm = ask.load(model, cfg.threads)
     n = len(cases)
     header = "budget  found  read   cut  median_rank  chars"
     print(f"cases: {n}" + (f", llm: {cfg.llm}" if llm else ""))
@@ -269,12 +274,12 @@ def run(args, cfg, embedder, db, cases, budgets) -> None:
 
 def eval_scan(args: argparse.Namespace) -> None:
     cfg = config.load(config.config_path())
-    embedder = Embedder(cfg.model, config.cache_dir() / "models")
+    embedder = Embedder(cfg.model, config.cache_dir() / "models", cfg.threads)
     model = ask.model_path(ask.llm_spec(cfg.llm), config.cache_dir() / "models")
     if model is None or not model.exists():
         sys.exit(f"LLM {cfg.llm} is not installed, run `ogmios install`")
     ask.CONTEXT_TOKENS = 8192  # room for the largest single read
-    llm = ask.load(model)
+    llm = ask.load(model, cfg.threads)
     today = date.today()
     with tempfile.TemporaryDirectory() as tmp:
         db = store.connect(Path(tmp) / "index.sqlite")

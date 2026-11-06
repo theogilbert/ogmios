@@ -101,3 +101,19 @@ def test_any_gguf_file_as_llm(tmp_path):
     path.write_text("[llm]\nrepo = 'org/repo'\n")
     with pytest.raises(ValueError, match="llm must be a string"):
         config.load(path)
+
+
+def test_threads(tmp_path, monkeypatch):
+    monkeypatch.delenv("OGMIOS_THREADS")
+    path = tmp_path / "config.toml"
+    assert config.load(path).threads is None
+    config.set_value(path, "threads", 3)
+    assert path.read_text() == "threads = 3\n"
+    assert config.load(path).threads == 3
+    monkeypatch.setenv("OGMIOS_THREADS", "2")
+    assert config.load(path).threads == 2
+    monkeypatch.setenv("OGMIOS_THREADS", "0")
+    assert config.load(path).threads is None  # no cap
+    monkeypatch.setenv("OGMIOS_THREADS", "many")
+    with pytest.raises(ValueError, match="invalid threads"):
+        config.load(path)

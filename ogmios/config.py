@@ -4,6 +4,7 @@
 
     model = "e5-small-int8"          # optional
     llm = "gemma-4-e2b"              # optional, or any GGUF file: "REPO/FILE.gguf"
+    threads = 4                      # optional: at most this many CPU threads
 
     [[sources]]
     name = "done"                    # optional: the file's stem, the directory's name
@@ -79,6 +80,7 @@ class Config:
     sources: list[Source]
     model: str = DEFAULT_MODEL
     llm: str = DEFAULT_LLM
+    threads: int | None = None  # at most this many CPU threads; None: no cap
 
 
 def config_path() -> Path:
@@ -120,7 +122,21 @@ def _xdg(variable: str, default: str) -> Path:
 
 
 def load(path: Path) -> Config:
-    return _parse(_read(path))
+    cfg = _parse(_read(path))
+    if (value := os.environ.get("OGMIOS_THREADS")) is not None:
+        cfg.threads = _threads(value)
+    return cfg
+
+
+def _threads(value: object) -> int | None:
+    """A cap on CPU threads, from the config or the environment; 0 is no cap."""
+    try:
+        threads = None if isinstance(value, bool) else int(str(value))
+    except ValueError:
+        threads = None
+    if threads is None or threads < 0:
+        raise ValueError(f"invalid threads {value!r}: a number, or 0 for no cap")
+    return threads or None
 
 
 def _parse(text: str) -> Config:
@@ -146,7 +162,8 @@ def _parse(text: str) -> Config:
         # A mistake in the file, reported as such by main(), not a bug: ValueError.
         raise ValueError("llm must be a string, see `ogmios config llm --help`")  # noqa: TRY004
     llm_spec(llm)
-    return Config(sources=sources, model=model, llm=llm)
+    threads = _threads(raw.get("threads", 0))
+    return Config(sources=sources, model=model, llm=llm, threads=threads)
 
 
 def _source(entry: dict) -> Source:
@@ -245,7 +262,7 @@ def remove_source(config_file: Path, name: str) -> Source:
     raise ValueError(f"no source named {name!r} (sources: {names})")
 
 
-def set_value(config_file: Path, key: str, value: str) -> None:
+def set_value(config_file: Path, key: str, value: str | int) -> None:
     """Set a top-level key, such as `model`."""
     lines = _read(config_file).splitlines(keepends=True)
     line = f"{key} = {_toml(value)}\n"
@@ -276,9 +293,11 @@ def tilde(path: Path) -> str:
 _TABLE_RE = re.compile(r"^\s*\[")
 
 
-def _toml(value: str | bool | list[str]) -> str:
+def _toml(value: str | bool | int | list[str]) -> str:
     if isinstance(value, bool):
         return str(value).lower()
+    if isinstance(value, int):
+        return str(value)
     if isinstance(value, list):
         return "[" + ", ".join(_toml(v) for v in value) + "]"
     quoted = json.dumps(value, ensure_ascii=False)

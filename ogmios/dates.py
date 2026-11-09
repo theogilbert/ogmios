@@ -1,5 +1,6 @@
 """Detection of date delimiter lines (daily-note headers) in English and French."""
 
+import datetime
 import itertools
 import re
 from dataclasses import dataclass
@@ -78,7 +79,7 @@ class Delimiter:
     label: str = ""  # what the header says besides the date ("Reprise")
 
     @property
-    def date(self) -> date | None:
+    def date(self) -> datetime.date | None:
         if self.year is None or self.month is None or self.day is None:
             return None
         return _safe_date(self.year, self.month, self.day)

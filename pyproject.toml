@@ -3,7 +3,7 @@ name = "ogmios"
 version = "0.1.0"
 description = "Questions about your markdown notes, answered by a local LLM"
 readme = "README.md"
-requires-python = ">=3.13"
+requires-python = ">=3.14"
 authors = [
   { name="Theo Gilbert" }
 ]

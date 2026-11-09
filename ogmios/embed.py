@@ -84,14 +84,14 @@ class Embedder:
     def downloaded(self) -> bool:
         return all((self.dir / f).exists() for f in self.files)
 
-    def passages(self, texts: Iterable[str]) -> "np.ndarray":
+    def passages(self, texts: Iterable[str]) -> np.ndarray:
         prefix = self.spec.passage_prefix
         return self._embed([prefix + t for t in texts])
 
-    def query(self, text: str) -> "np.ndarray":
+    def query(self, text: str) -> np.ndarray:
         return self._embed([self.spec.query_prefix + text])[0]
 
-    def _embed(self, texts: list[str]) -> "np.ndarray":
+    def _embed(self, texts: list[str]) -> np.ndarray:
         import numpy as np
 
         # Not in a background thread: the tokenizer holds the GIL while it loads.
@@ -119,7 +119,7 @@ class Embedder:
             result[batch] = pooled / np.linalg.norm(pooled, axis=1, keepdims=True)
         return result
 
-    def _load_tokenizer(self) -> "tuple[tokenizers.Tokenizer, np.ndarray]":
+    def _load_tokenizer(self) -> tuple[tokenizers.Tokenizer, np.ndarray]:
         """The pruned tokenizer, and the model's id for each of its token ids."""
         import numpy as np
         import tokenizers
@@ -135,7 +135,7 @@ class Embedder:
         tokenizer.enable_padding(pad_id=PAD_ID, pad_token="<pad>")
         return tokenizer, np.load(ids)
 
-    def _load_session(self) -> "onnxruntime.InferenceSession":
+    def _load_session(self) -> onnxruntime.InferenceSession:
         import onnxruntime
 
         options = onnxruntime.SessionOptions()

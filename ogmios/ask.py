@@ -99,7 +99,7 @@ class Excerpt:
 
 def gather(
     db: sqlite3.Connection,
-    embedder: "Embedder | None",
+    embedder: Embedder | None,
     topic: str,
     period: Period | None,
     days: int,
@@ -195,7 +195,7 @@ class _Day:
         self.matched = [set(range(s, e)) for s, e in finer[1:]]
 
     @classmethod
-    def of(cls, db: sqlite3.Connection, hit: Hit, file_lines: dict) -> "_Day | None":
+    def of(cls, db: sqlite3.Connection, hit: Hit, file_lines: dict) -> _Day | None:
         row = db.execute(
             "SELECT start_line, end_line FROM sections WHERE id = ?", (hit.section,)
         ).fetchone()
@@ -451,7 +451,7 @@ def thread_counts(threads: int | None) -> tuple[int | None, int | None]:
     return min(threads, max(cpus // 2, 1)), min(threads, cpus)
 
 
-def load(model: Path, threads: int | None = None) -> "llama_cpp.Llama":
+def load(model: Path, threads: int | None = None) -> llama_cpp.Llama:
     # Imported here: loading llama.cpp would slow down every other command.
     import ctypes
 
@@ -492,7 +492,7 @@ def load(model: Path, threads: int | None = None) -> "llama_cpp.Llama":
     return llm
 
 
-def other_wordings(llm: "llama_cpp.Llama", question: str) -> str:
+def other_wordings(llm: llama_cpp.Llama, question: str) -> str:
     """Search terms for what the question is about, synonyms and translations included,
     to search with besides the question itself."""
     out = llm.create_chat_completion(
@@ -507,13 +507,13 @@ def other_wordings(llm: "llama_cpp.Llama", question: str) -> str:
     return " ".join(text.split())
 
 
-def prompt_tokens(llm: "llama_cpp.Llama", chat: list[dict]) -> int:
+def prompt_tokens(llm: llama_cpp.Llama, chat: list[dict]) -> int:
     """About the tokens the model read: the messages, without the chat template's."""
     text = "\n".join(m["content"] for m in chat)
     return len(llm.tokenize(text.encode(), add_bos=False))
 
 
-def answer(llm: "llama_cpp.Llama", chat: list[dict]) -> Iterator[str]:
+def answer(llm: llama_cpp.Llama, chat: list[dict]) -> Iterator[str]:
     """The answer, piece by piece as it is written; nothing comes until the model has
     read the notes, most of the wait."""
     stream = llm.create_chat_completion(

@@ -88,7 +88,7 @@ def subject(question: str) -> str:
 
 def candidates(
     db: sqlite3.Connection,
-    embedder: "Embedder | None",
+    embedder: Embedder | None,
     topic: str,
     mode: str,
     period: Period | None,
@@ -195,7 +195,7 @@ class Scan:
 
 
 def run(
-    llm: "llama_cpp.Llama",
+    llm: llama_cpp.Llama,
     state: Scan,
     on_day=lambda number, total: None,
 ) -> Iterator[Verdict]:

@@ -51,7 +51,7 @@ def remote_size(repo: str, revision: str, filename: str) -> int | None:
     try:
         with urllib.request.urlopen(request, timeout=30) as response:
             return int(response.headers["Content-Length"])
-    except (OSError, KeyError, ValueError, TypeError):
+    except OSError, KeyError, ValueError, TypeError:
         return None
 
 

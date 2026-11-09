@@ -94,7 +94,7 @@ def host(url: str) -> str:
     return urllib.parse.urlsplit(url).netloc
 
 
-def default_name(url: str, kind: "Kind") -> str:
+def default_name(url: str, kind: Kind) -> str:
     return project_path(url).rsplit("/", 1)[-1] + kind.name_suffix
 
 
@@ -124,7 +124,7 @@ def fetch(
     url: str,
     directory: Path,
     token: str | None,
-    kind: "Kind",
+    kind: Kind,
     full: bool = False,
     progress: Callable[[int], None] = lambda n: None,
 ) -> FetchStats:
@@ -393,7 +393,7 @@ class _Api:
 def _read_state(path: Path) -> dict:
     try:
         return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    except OSError, ValueError:
         return {}
 
 

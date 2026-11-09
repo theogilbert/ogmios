@@ -1,5 +1,9 @@
 # ogmios
 
+> [!NOTE]
+> This project is developed by [Claude](https://claude.com/claude-code), Anthropic's AI
+> model, under human direction: most of its code and documentation were written by Claude.
+
 Questions about your markdown notes, answered by a small local LLM from the days it
 finds, in English or French, whatever the language you wrote them in.
 
